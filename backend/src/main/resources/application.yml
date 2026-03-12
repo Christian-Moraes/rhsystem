@@ -1,0 +1,59 @@
+spring:
+  application:
+    name: rhsystem-backend
+  
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/rhsystem}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-binding-errors: always
+
+# Groq API (importação por imagem) — env GROQ_API_KEY ou arquivo (atualizar sem reiniciar: echo "gsk_xxx" > /tmp/groq_api_key no container)
+groq:
+  api-key: ${GROQ_API_KEY:${GROQ_APIKEY:}}
+  # Se existir, lê a chave deste arquivo a cada requisição (permite atualizar com docker exec sem derrubar)
+  api-key-file: ${GROQ_API_KEY_FILE:/tmp/groq_api_key}
+  # Modelo de visão principal (opcional). Se vazio, usa a lista vision-fallbacks.
+  model: ${GROQ_MODEL:}
+  # Fallbacks de modelo de visão, em ordem (separados por vírgula). Usados quando model está vazio ou falha.
+  vision-fallbacks: ${GROQ_VISION_FALLBACKS:meta-llama/llama-4-scout-17b-16e-instruct,llama-3.2-90b-vision-preview}
+  # Modelo de pensar/raciocínio (opcional). Fallback quando todos os de visão falham (envia só texto).
+  thinking-model: ${GROQ_THINKING_MODEL:qwen/qwen3-32b}
+
+jwt:
+  secret: ${JWT_SECRET:your-256-bit-secret-key-change-in-production-minimum-32-characters}
+  expiration: 86400000 # 24 horas em milissegundos
+  refresh-expiration: 604800000 # 7 dias em milissegundos
+
+logging:
+  level:
+    com.rhsystem: DEBUG
+    org.springframework.security: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"

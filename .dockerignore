@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.md
+.env
+.env.local
+node_modules/
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+mermaid.md

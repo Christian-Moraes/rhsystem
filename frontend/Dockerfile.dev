@@ -1,0 +1,19 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Instalar dependências primeiro (cache layer)
+COPY package.json package-lock.json* ./
+RUN npm install --no-audit --no-fund
+
+# Copiar arquivos de configuração necessários
+COPY tsconfig.json ./
+COPY tsconfig.node.json ./
+COPY vite.config.ts ./
+COPY index.html ./
+
+# Expor porta do Vite
+EXPOSE 3000
+
+# Comando para desenvolvimento com hot reload
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]
