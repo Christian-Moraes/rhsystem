@@ -1,0 +1,7 @@
+# Perfil dev: backend rodando na máquina (mvn spring-boot:run), Postgres no Docker na porta 5440
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5440/rhsystem
+
+server:
+  port: 8086

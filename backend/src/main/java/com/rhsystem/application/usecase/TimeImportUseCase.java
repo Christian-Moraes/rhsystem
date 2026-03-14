@@ -276,6 +276,7 @@ public class TimeImportUseCase {
             if (extractedTimes == null || extractedTimes.isEmpty()) {
                 throw new RuntimeException("A IA não extraiu nenhum horário da imagem. Verifique se a folha de ponto está legível e tente outra foto.");
             }
+            extractedTimes.sort(LocalDateTime::compareTo);
             LocalDate minDate = extractedTimes.stream().map(LocalDateTime::toLocalDate).min(LocalDate::compareTo).orElse(null);
             LocalDate maxDate = extractedTimes.stream().map(LocalDateTime::toLocalDate).max(LocalDate::compareTo).orElse(null);
             log.info("[IMPORT_IMAGE] IA retornou {} horários, intervalo de datas: {} a {}", extractedTimes.size(), minDate, maxDate);
