@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { employeeService } from '../services/employeeService'
 import { timesheetService } from '../services/timesheetService'
 import { timeEventService, TimeEventRequest } from '../services/timeEventService'
@@ -10,6 +10,8 @@ import { useToast } from '../contexts/ToastContext'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
+import CompanySelect from '../components/ui/CompanySelect'
+import EmployeeSelect from '../components/ui/EmployeeSelect'
 import { ClockIcon, UploadIcon, CheckCircleIcon } from '../components/icons'
 
 interface DayEntry {
@@ -18,10 +20,12 @@ interface DayEntry {
 }
 
 export default function TimesheetPage() {
+  const [searchParams] = useSearchParams()
+  const employeeIdFromUrl = searchParams.get('employeeId') ?? ''
   const { selectedCompany, companies, setCompany } = useCompany()
   const { showToast } = useToast()
   const queryClient = useQueryClient()
-  const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('')
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>(employeeIdFromUrl)
   const [month, setMonth] = useState(new Date().getMonth() + 1)
   const [year, setYear] = useState(new Date().getFullYear())
   const [gradeData, setGradeData] = useState<Record<string, DayEntry>>({})
@@ -29,11 +33,22 @@ export default function TimesheetPage() {
   const [importFiles, setImportFiles] = useState<File[]>([])
   const [importDragActive, setImportDragActive] = useState(false)
 
-  const { data: employees = [] } = useQuery({
+  const { data: employees = [], isLoading: isEmployeesLoading } = useQuery({
     queryKey: ['employees', selectedCompany?.id],
     queryFn: () => employeeService.getAll(selectedCompany?.id || ''),
     enabled: !!selectedCompany?.id,
   })
+
+  useEffect(() => {
+    if (employeeIdFromUrl) setSelectedEmployeeId(employeeIdFromUrl)
+  }, [employeeIdFromUrl])
+
+  useEffect(() => {
+    if (selectedCompany?.id && selectedEmployeeId && employees.length > 0) {
+      const belongs = employees.some((e) => e.id === selectedEmployeeId)
+      if (!belongs) setSelectedEmployeeId('')
+    }
+  }, [selectedCompany?.id, selectedEmployeeId, employees])
 
   const { data: timesheet, isLoading: _timesheetLoading, error: _timesheetError } = useQuery({
     queryKey: ['timesheet', selectedCompany?.id, selectedEmployeeId, month, year],
@@ -358,153 +373,133 @@ export default function TimesheetPage() {
     return (minutes / 60).toFixed(2).replace('.', ',')
   }
 
-  const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId)
   const monthName = new Date(2000, month - 1).toLocaleString('pt-BR', { month: 'long' })
-
-  if (!selectedCompany) {
-    return (
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Fechamento de Ponto</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Consolidação por funcionário e mês — manual, CSV ou IA. Não é batida em tempo real.
-          </p>
-        </div>
-        <Card>
-          <div className="text-center py-8">
-            {companies.length === 0 ? (
-              <>
-                <p className="text-gray-600 mb-4">Nenhuma empresa cadastrada.</p>
-                <Link to="/companies">
-                  <Button>Cadastrar Empresa</Button>
-                </Link>
-              </>
-            ) : (
-              <>
-                <p className="text-gray-600 mb-4">Selecione uma empresa para continuar.</p>
-                <div className="mx-auto max-w-xs">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Empresa</label>
-                  <select
-                    onChange={(e) => {
-                      const company = companies.find((c) => c.id === e.target.value)
-                      if (company) setCompany(company)
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="">Selecione...</option>
-                    {companies.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="mt-4">
-                  <Link to="/companies">
-                    <Button variant="outline">Gerenciar Empresas</Button>
-                  </Link>
-                </div>
-              </>
-            )}
-          </div>
-        </Card>
-      </div>
-    )
-  }
+  const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId)
+  const hasContext = !!selectedCompany && !!selectedEmployeeId
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Fechamento de Ponto</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Consolidação por funcionário e mês — manual, CSV ou IA. Não é batida em tempo real.
-          </p>
-        </div>
-        {selectedEmployeeId && (
-          <div className="flex gap-2">
-            {hasUnsavedChanges && (
-              <Button
-                type="button"
-                onClick={() => saveGradeMutation.mutate()}
-                disabled={saveGradeMutation.isPending}
-                isLoading={saveGradeMutation.isPending}
-                variant="outline"
-              >
-                Salvar Grade
-              </Button>
-            )}
-            <Link to="/time-import">
-              <Button type="button" variant="outline" icon={<UploadIcon className="w-4 h-4" />}>
-                Importar
-              </Button>
-            </Link>
-          </div>
-        )}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Fechamento de Ponto</h1>
+        <p className="mt-1 text-sm text-gray-500">
+          Selecione a empresa e o funcionário para fechar o ponto do mês.
+        </p>
       </div>
 
-      {/* Seleção de Funcionário e Período */}
-      <Card
-        title="Seleção"
-        description="Escolha o funcionário e o período para fechamento"
-      >
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Funcionário</label>
-            <select
-              value={selectedEmployeeId}
-              onChange={(e) => setSelectedEmployeeId(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">Selecione um funcionário</option>
-              {employees.map((emp) => (
-                <option key={emp.id} value={emp.id}>
-                  {emp.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Mês</label>
-            <select
-              value={month}
-              onChange={(e) => setMonth(parseInt(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                <option key={m} value={m}>
-                  {new Date(2000, m - 1).toLocaleString('pt-BR', { month: 'long' })}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Ano</label>
-            <input
-              type="number"
-              value={year}
-              onChange={(e) => setYear(parseInt(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+      {/* Barra de contexto: mesma pesquisa da tela de Funcionários (overflow-visible para o dropdown não ser cortado) */}
+      <Card className="border border-gray-200 bg-gray-50/50 overflow-visible">
+        <div className="flex flex-col sm:flex-row gap-4 sm:gap-6">
+          <div className="flex-1 min-w-0">
+            <CompanySelect
+              label="Empresa"
+              value={selectedCompany?.id ?? ''}
+              onChange={(id) => {
+                const c = companies.find((x) => x.id === id)
+                if (c) setCompany(c)
+              }}
             />
           </div>
-          <div className="flex items-end">
-            <Button
-              onClick={() => closeMutation.mutate()}
-              disabled={!selectedEmployeeId || closeMutation.isPending || hasUnsavedChanges}
-              isLoading={closeMutation.isPending}
-              className="w-full"
-              icon={<CheckCircleIcon className="w-4 h-4" />}
-            >
-              Fechar Mês
-            </Button>
+          <div className="flex-1 min-w-0">
+            {selectedCompany && employees.length === 0 && !isEmployeesLoading ? (
+              <>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Funcionário</label>
+                <div className="flex items-center gap-2 py-2.5 text-gray-500 text-sm">
+                  Nenhum funcionário nesta empresa.
+                  <Link to="/employees" className="text-blue-600 hover:text-blue-800 font-medium shrink-0">
+                    Cadastrar
+                  </Link>
+                </div>
+              </>
+            ) : (
+              <EmployeeSelect
+                label="Funcionário"
+                employees={employees}
+                value={selectedEmployeeId}
+                onChange={setSelectedEmployeeId}
+                disabled={!selectedCompany}
+                placeholder="Selecione o funcionário"
+                isLoading={isEmployeesLoading}
+              />
+            )}
           </div>
         </div>
       </Card>
 
-      {selectedEmployeeId && (
+      {/* Conteúdo: só quando empresa e funcionário escolhidos */}
+      {!hasContext ? (
+        <Card className="border border-dashed border-gray-300 bg-gray-50/30">
+          <div className="py-12 text-center">
+            <ClockIcon className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+            <p className="text-gray-600 font-medium">Selecione uma empresa e um funcionário acima para fechar o ponto.</p>
+            <p className="text-sm text-gray-500 mt-1">O fechamento (grade, importação e resumo) aparecerá aqui.</p>
+          </div>
+        </Card>
+      ) : (
         <>
-          {/* Importar na mesma tela */}
+          {/* Título do fechamento */}
+          <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4 md:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Fechando ponto de {selectedEmployee?.name || 'Funcionário'}</h2>
+                <p className="text-sm text-gray-600 mt-0.5">
+                  {selectedCompany?.name} · {monthName}/{year}
+                </p>
+              </div>
+              {hasUnsavedChanges && (
+                <Button
+                  type="button"
+                  onClick={() => saveGradeMutation.mutate()}
+                  disabled={saveGradeMutation.isPending}
+                  isLoading={saveGradeMutation.isPending}
+                  variant="outline"
+                >
+                  Salvar Grade
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {/* Período e Fechar Mês */}
+          <Card>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Mês</label>
+                <select
+                  value={month}
+                  onChange={(e) => setMonth(parseInt(e.target.value))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                    <option key={m} value={m}>
+                      {new Date(2000, m - 1).toLocaleString('pt-BR', { month: 'long' })}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Ano</label>
+                <input
+                  type="number"
+                  value={year}
+                  onChange={(e) => setYear(parseInt(e.target.value))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div className="flex items-end">
+                <Button
+                  onClick={() => closeMutation.mutate()}
+                  disabled={closeMutation.isPending || hasUnsavedChanges}
+                  isLoading={closeMutation.isPending}
+                  className="w-full"
+                  icon={<CheckCircleIcon className="w-4 h-4" />}
+                >
+                  Fechar Mês
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          {/* Importar */}
           <Card
             title="Importar imagem/CSV"
             description="Envie uma folha de ponto (imagem ou CSV) para preencher a grade pela IA"
@@ -785,6 +780,9 @@ export default function TimesheetPage() {
                 <div className="bg-gradient-to-br from-red-50 to-red-100 rounded-xl p-5 border border-red-200">
                   <p className="text-sm font-medium text-red-700 mb-1">Atrasos</p>
                   <p className="text-3xl font-bold text-red-900">{formatMinutes(timesheet.delayMinutes)}</p>
+                  {timesheet.delayMinutes > 24 * 60 && (
+                    <p className="text-xs text-red-600 mt-1">Valor alto? Confira a escala e use &quot;Recalcular&quot;.</p>
+                  )}
                 </div>
                 <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-xl p-5 border border-orange-200">
                   <p className="text-sm font-medium text-orange-700 mb-1">Ausências</p>
@@ -792,7 +790,7 @@ export default function TimesheetPage() {
                 </div>
               </div>
               {timesheet.closedAt && (
-                <div className="mt-4 pt-4 border-t border-gray-200">
+                <div className="mt-4 pt-4 border-t border-gray-200 flex flex-wrap items-center gap-3">
                   <Badge variant="success" size="md">
                     Fechado em {new Date(timesheet.closedAt).toLocaleDateString('pt-BR', {
                       day: '2-digit',
@@ -802,6 +800,17 @@ export default function TimesheetPage() {
                       minute: '2-digit',
                     })}
                   </Badge>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => closeMutation.mutate()}
+                    disabled={closeMutation.isPending || hasUnsavedChanges}
+                    isLoading={closeMutation.isPending}
+                  >
+                    Recalcular resumo
+                  </Button>
+                  <span className="text-xs text-gray-500">Atualiza horas, atrasos e ausências com a escala atual.</span>
                 </div>
               )}
             </Card>

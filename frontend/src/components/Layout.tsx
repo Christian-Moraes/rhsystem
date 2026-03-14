@@ -1,13 +1,11 @@
 import { ReactNode, useState, useEffect, useCallback } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { useCompany } from '../contexts/CompanyContext'
 import {
   DashboardIcon,
   BuildingIcon,
   UsersIcon,
   ClockIcon,
-  UploadIcon,
   DocumentIcon,
   MenuIcon,
   ChevronDownIcon,
@@ -31,8 +29,6 @@ const NAV = [
   { name: 'Dashboard', href: '/dashboard', icon: DashboardIcon },
   { name: 'Empresas', href: '/companies', icon: BuildingIcon },
   { name: 'Funcionários', href: '/employees', icon: UsersIcon },
-  { name: 'Eventos de Ponto', href: '/time-events', icon: ClockIcon },
-  { name: 'Importar Ponto', href: '/time-import', icon: UploadIcon },
   { name: 'Fechamento', href: '/timesheet', icon: DocumentIcon },
 ] as const
 
@@ -42,7 +38,6 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth()
-  const { company, companies, setCompany } = useCompany()
   const location = useLocation()
   const isDesktop = useIsDesktop()
 
@@ -122,28 +117,6 @@ export default function Layout({ children }: LayoutProps) {
               )
             })}
           </nav>
-
-          {companies.length > 0 && (
-            <div className="border-t border-gray-200 px-4 py-4">
-              <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-gray-500">
-                Empresa Ativa
-              </label>
-              <select
-                value={company?.id ?? ''}
-                onChange={(e) => {
-                  const sel = companies.find((c) => c.id === e.target.value)
-                  if (sel) setCompany(sel)
-                }}
-                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {companies.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <div className="border-t border-gray-200 p-4">
             <div className="relative">

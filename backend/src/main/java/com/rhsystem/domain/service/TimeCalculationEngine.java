@@ -122,15 +122,20 @@ public class TimeCalculationEngine {
         }
 
         LocalTime expectedEntry = schedule.getEntryTime();
+        // Horário de entrada antes das 05:00 indica escala mal configurada (ex.: 00:00).
+        // Nesse caso não calculamos atraso para evitar valores absurdos (ex.: 14h por dia).
+        if (expectedEntry.isBefore(LocalTime.of(5, 0))) {
+            return 0;
+        }
         int tolerance = schedule.getToleranceLate();
-        
+
         if (entryTime.isAfter(expectedEntry.plusMinutes(tolerance))) {
             return (int) java.time.Duration.between(
-                    expectedEntry.plusMinutes(tolerance), 
+                    expectedEntry.plusMinutes(tolerance),
                     entryTime
             ).toMinutes();
         }
-        
+
         return 0;
     }
 

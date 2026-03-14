@@ -6,7 +6,7 @@ import { employeeService } from '../services/employeeService'
 import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
-import { DashboardIcon, BuildingIcon, UsersIcon, UploadIcon, DocumentIcon, ClockIcon, PlusIcon } from '../components/icons'
+import { DashboardIcon, BuildingIcon, UsersIcon, DocumentIcon, PlusIcon } from '../components/icons'
 
 export default function Dashboard() {
   const { selectedCompany } = useCompany()
@@ -36,18 +36,6 @@ export default function Dashboard() {
       icon: UsersIcon,
       color: 'from-green-500 to-green-600',
       link: '/employees',
-    },
-    {
-      name: 'Eventos de Ponto',
-      icon: ClockIcon,
-      color: 'from-purple-500 to-purple-600',
-      link: '/time-events',
-    },
-    {
-      name: 'Importar Ponto',
-      icon: UploadIcon,
-      color: 'from-indigo-500 to-indigo-600',
-      link: '/time-import',
     },
     {
       name: 'Fechamento',
@@ -121,19 +109,6 @@ export default function Dashboard() {
                     <div className="flex-1">
                       <span className="font-medium text-gray-900 block">Cadastrar Funcionário</span>
                       <p className="text-sm text-gray-500">Adicionar novo funcionário</p>
-                    </div>
-                  </div>
-                </button>
-              </Link>
-              <Link to="/time-import">
-                <button className="w-full text-left px-4 py-3 rounded-lg hover:bg-purple-50 transition-colors border border-transparent hover:border-purple-200 group">
-                  <div className="flex items-center space-x-3">
-                    <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-purple-100 group-hover:bg-purple-200 flex items-center justify-center transition-colors">
-                      <UploadIcon className="w-4 h-4 text-purple-600" />
-                    </div>
-                    <div className="flex-1">
-                      <span className="font-medium text-gray-900 block">Importar Ponto</span>
-                      <p className="text-sm text-gray-500">Importar registros de ponto</p>
                     </div>
                   </div>
                 </button>

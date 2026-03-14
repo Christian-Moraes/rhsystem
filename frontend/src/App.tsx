@@ -8,9 +8,7 @@ import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
 import Companies from './pages/Companies'
 import Employees from './pages/Employees'
-import TimeImport from './pages/TimeImport'
 import TimesheetPage from './pages/Timesheet'
-import TimeEvents from './pages/TimeEvents'
 import PrivateRoute from './components/PrivateRoute'
 
 function App() {
@@ -48,26 +46,6 @@ function App() {
                   <PrivateRoute>
                     <Layout>
                       <Employees />
-                    </Layout>
-                  </PrivateRoute>
-                }
-              />
-              <Route
-                path="/time-import"
-                element={
-                  <PrivateRoute>
-                    <Layout>
-                      <TimeImport />
-                    </Layout>
-                  </PrivateRoute>
-                }
-              />
-              <Route
-                path="/time-events"
-                element={
-                  <PrivateRoute>
-                    <Layout>
-                      <TimeEvents />
                     </Layout>
                   </PrivateRoute>
                 }

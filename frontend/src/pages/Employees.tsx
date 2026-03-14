@@ -11,7 +11,7 @@ import Modal from '../components/ui/Modal'
 import Input from '../components/ui/Input'
 import Badge from '../components/ui/Badge'
 import CompanySelect from '../components/ui/CompanySelect'
-import { PlusIcon, EditIcon, TrashIcon, ClockIcon, UsersIcon, BuildingIcon } from '../components/icons'
+import { PlusIcon, EditIcon, TrashIcon, DocumentIcon, UsersIcon, BuildingIcon } from '../components/icons'
 
 export default function Employees() {
   const { showToast } = useToast()
@@ -189,11 +189,11 @@ export default function Employees() {
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
                       <div className="flex items-center space-x-3">
                         <Link
-                          to={`/time-events?employeeId=${employee.id}`}
+                          to={`/timesheet?employeeId=${employee.id}`}
                           className="text-blue-600 hover:text-blue-900 font-medium flex items-center gap-1"
                         >
-                          <ClockIcon className="w-4 h-4" />
-                          Ponto
+                          <DocumentIcon className="w-4 h-4" />
+                          Fechamento
                         </Link>
                         <button
                           onClick={() => handleEdit(employee)}

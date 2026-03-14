@@ -86,7 +86,10 @@ export default function CompanySelect({
                 <BuildingIcon className="w-5 h-5 text-gray-400 flex-shrink-0" />
                 <div className="min-w-0 flex-1">
                   <p className="font-medium truncate">{selectedCompany.name}</p>
-                  <p className="text-xs text-gray-500 truncate">{selectedCompany.cnpj}</p>
+                  <p className="text-xs text-gray-600 mt-0.5">
+                    <span className="text-gray-500 font-medium">CNPJ:</span>{' '}
+                    <span className="text-gray-700 font-mono tracking-wide break-all">{selectedCompany.cnpj}</span>
+                  </p>
                 </div>
               </div>
               <ChevronDownIcon className={`w-5 h-5 text-gray-400 transition-transform flex-shrink-0 ml-2 ${isOpen ? 'rotate-180' : ''}`} />
@@ -100,8 +103,8 @@ export default function CompanySelect({
         </button>
 
         {isOpen && (
-          <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-80 overflow-hidden animate-fade-in">
-            <div className="p-3 border-b border-gray-200 bg-gray-50">
+          <div className="absolute z-[100] w-full mt-1 rounded-lg shadow-xl max-h-80 overflow-hidden animate-fade-in bg-white border border-gray-200 ring-2 ring-gray-200/50">
+            <div className="p-3 border-b border-gray-200 bg-gray-100">
               <div className="relative">
                 <SearchIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
@@ -114,7 +117,7 @@ export default function CompanySelect({
                 />
               </div>
             </div>
-            <div className="overflow-y-auto max-h-64">
+            <div className="overflow-y-auto max-h-64 bg-white">
               {isLoading ? (
                 <div className="p-6 text-center text-gray-500">
                   <div className="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>

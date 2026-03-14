@@ -279,13 +279,22 @@ public class TimeImportUseCase {
             LocalDate minDate = extractedTimes.stream().map(LocalDateTime::toLocalDate).min(LocalDate::compareTo).orElse(null);
             LocalDate maxDate = extractedTimes.stream().map(LocalDateTime::toLocalDate).max(LocalDate::compareTo).orElse(null);
             log.info("[IMPORT_IMAGE] IA retornou {} horários, intervalo de datas: {} a {}", extractedTimes.size(), minDate, maxDate);
-            for (int i = 0; i < extractedTimes.size(); i++) {
+            // Alternar ENTRY/EXIT por DIA (não global): cada dia começa com ENTRY, assim um dia com horário extra ou ordem errada não desloca os próximos.
+            LocalDate prevDate = null;
+            int punchIndexInDay = 0;
+            for (LocalDateTime eventTime : extractedTimes) {
+                LocalDate d = eventTime.toLocalDate();
+                if (!d.equals(prevDate)) {
+                    prevDate = d;
+                    punchIndexInDay = 0;
+                }
                 TimeEvent event = new TimeEvent();
                 event.setEmployeeId(employeeId);
-                event.setEventTime(extractedTimes.get(i));
-                event.setEventType(i % 2 == 0 ? TimeEventType.ENTRY : TimeEventType.EXIT);
+                event.setEventTime(eventTime);
+                event.setEventType(punchIndexInDay % 2 == 0 ? TimeEventType.ENTRY : TimeEventType.EXIT);
                 event.setStatus(TimeEventStatus.REVIEW);
                 events.add(event);
+                punchIndexInDay++;
             }
         } catch (RuntimeException e) {
             throw e;
@@ -300,17 +309,20 @@ public class TimeImportUseCase {
         log.info("[IMPORT_IMAGE] extractTimesViaGroq: imageBytes={} bytes, targetMonth={}, targetYear={}", imageBytes.length, targetMonth, targetYear);
         String mime = contentType != null && contentType.startsWith("image/") ? contentType : "image/jpeg";
         String dataUrl = "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
-        String periodInstruction = "OBRIGATÓRIO — LEIA TUDO DA PRÓPRIA IMAGEM: "
-                + "(1) MÊS E ANO: Leia o mês e o ano que aparecem na folha (ex.: 'Fevereiro', 'Janeiro', '02/2026', 'Mês: 2', 'Ano: 2026'). Use ESSES valores para montar as datas. Só use outro mês/ano se a folha não mostrar. "
-                + "(2) QUINZENA/PERÍODO: Leia o título da tabela: '1ª Quinzena' = dias 1 a 15; '2ª Quinzena' = dias 16 a 31. Use exatamente os dias que constam na folha. "
-                + "(3) DIAS: A primeira coluna traz o número do DIA. Para cada linha com horários, monte a data YYYY-MM-DD usando o mês e ano da folha e o número do dia. Pule linhas em branco. "
-                + "Não invente datas: use somente mês, ano e dias que constam na imagem.";
-        String prompt = "Você analisa uma imagem de folha de ponto ou espelho de ponto (pode ter texto impresso e anotações à mão). "
-                + "Extraia TODAS as batidas (horários) agrupadas por DATA. "
-                + periodInstruction + " "
-                + "Responda APENAS um JSON válido, sem markdown, neste formato exato:\n"
+        String prompt = "Você analisa uma imagem de folha de ponto, cartão de ponto ou espelho de ponto (qualquer modelo: quinzena, mês completo, cartão físico, planilha, com texto impresso e/ou anotações à mão). "
+                + "Extraia TODAS as batidas (horários) agrupadas por DATA.\n\n"
+                + "REGRAS GLOBAIS — valem para QUALQUER tipo de ponto; siga sempre o que está na imagem:\n"
+                + "(1) MÊS E ANO: Use o mês e o ano indicados na folha (ex.: Janeiro, Fevereiro, 01/2026, Mês/Ano, cabeçalho, etc.).\n"
+                + "(2) DIAS: Identifique a coluna ou célula que traz o número do DIA (1 a 31). Pode ser \"Dia\", \"Data\", primeira coluna, etc. "
+                + "Use exatamente os dias que aparecem na tabela — não assuma período (pode ser 1–15, 16–31, 1–31 ou outro).\n"
+                + "(3) LINHAS: Para cada linha que tiver PELO MENOS UM horário preenchido, inclua esse dia no JSON. "
+                + "Inclua a PRIMEIRA e a ÚLTIMA linha da tabela que tiverem dados (não omita o primeiro nem o último dia). Não pare antes do fim da tabela. Linha totalmente em branco = não inclua.\n"
+                + "(4) HORÁRIOS: Em cada linha, leia os horários NA ORDEM em que aparecem (da esquerda para a direita). "
+                + "Cada dia pode ter 2, 4, 6 ou mais horários conforme o layout (entrada/saída, manhã/tarde, extra, etc.). "
+                + "Formato HH:mm em 24h. Célula vazia = não inclua na lista \"times\".\n\n"
+                + "Responda APENAS um JSON válido, sem markdown:\n"
                 + "{\"days\":[{\"date\":\"YYYY-MM-DD\",\"times\":[\"HH:mm\",\"HH:mm\",...]},...]}\n"
-                + "Para cada dia visível na tabela, crie um objeto em \"days\" com a data correta (YYYY-MM-DD conforme mês/ano/quinzena da IMAGEM) e a lista \"times\" na ordem: Manhã Entrada, Manhã Saída, Tarde Entrada, Tarde Saída. Use HH:mm em 24h. Células vazias = não inclua esse horário; linhas sem nenhum horário = pule esse dia.";
+                + "Não invente datas nem horários. Inclua todos os dias que tiverem pelo menos um horário. Lista completa.";
         log.debug("[IMPORT_IMAGE] Prompt enviado à IA (primeiros 500 chars): {}", prompt.length() > 500 ? prompt.substring(0, 500) + "..." : prompt);
         List<String> modelsToTry = new ArrayList<>();
         if (groqModel != null && !groqModel.isBlank()) {
@@ -355,7 +367,7 @@ public class TimeImportUseCase {
     private List<LocalDateTime> callGroqVision(String dataUrl, String prompt, String modelId, int targetMonth, int targetYear) throws Exception {
         var root = objectMapper.createObjectNode();
         root.put("model", modelId);
-        root.put("max_tokens", 2048);
+        root.put("max_tokens", 8192);
         root.put("temperature", 0.2);
         var messages = root.putArray("messages");
         var userMsg = messages.addObject();
@@ -435,14 +447,26 @@ public class TimeImportUseCase {
             text = contentNode.asText("").trim();
         }
         if (text.startsWith("```")) {
-            int o = text.indexOf('{');
-            int c = text.lastIndexOf('}');
+            // Tenta extrair apenas o bloco JSON dentro de ``` ``` (evita pegar texto explicativo antes/depois)
+            int codeFenceStart = text.indexOf("```json");
+            if (codeFenceStart < 0) {
+                codeFenceStart = text.indexOf("```");
+            }
+            int codeFenceEnd = codeFenceStart >= 0 ? text.indexOf("```", codeFenceStart + 3) : -1;
+            String inner = text;
+            if (codeFenceStart >= 0 && codeFenceEnd > codeFenceStart) {
+                inner = text.substring(codeFenceStart + 3, codeFenceEnd);
+            }
+            int o = inner.indexOf('{');
+            int c = inner.lastIndexOf('}');
             if (o >= 0 && c > o) {
-                text = text.substring(o, c + 1);
+                text = inner.substring(o, c + 1);
             } else {
-                int a = text.indexOf('[');
-                int b = text.lastIndexOf(']');
-                if (a >= 0 && b > a) text = text.substring(a, b + 1);
+                int a = inner.indexOf('[');
+                int b = inner.lastIndexOf(']');
+                if (a >= 0 && b > a) {
+                    text = inner.substring(a, b + 1);
+                }
             }
         }
         List<LocalDateTime> out = new ArrayList<>();
@@ -455,25 +479,30 @@ public class TimeImportUseCase {
                 JsonNode days = obj.path("days");
                 if (days.isArray()) {
                     for (JsonNode dayNode : days) {
+                        int day = -1;
                         String ds = dayNode.path("date").asText(null);
-                        LocalDate ld = def;
                         if (ds != null && !ds.isBlank()) {
                             ds = ds.trim();
                             if (ds.length() >= 10) {
                                 try {
                                     String part = ds.substring(0, 10);
                                     if (part.matches("\\d{4}-\\d{2}-\\d{2}")) {
-                                        ld = LocalDate.parse(part);
+                                        day = LocalDate.parse(part).getDayOfMonth();
                                     } else if (part.matches("\\d{2}/\\d{2}/\\d{4}")) {
                                         String[] d = part.split("/");
-                                        ld = LocalDate.of(Integer.parseInt(d[2]), Integer.parseInt(d[1]), Integer.parseInt(d[0]));
+                                        day = Integer.parseInt(d[0]);
                                     }
                                 } catch (Exception ignored) { }
                             }
                         }
-                        int day = ld.getDayOfMonth();
-                        int maxDay = def.lengthOfMonth();
+                        if (day < 1 || day > 31) {
+                            JsonNode dayNum = dayNode.path("day");
+                            if (!dayNum.isMissingNode() && dayNum.isNumber()) {
+                                day = dayNum.asInt();
+                            }
+                        }
                         if (day < 1) day = 1;
+                        int maxDay = def.lengthOfMonth();
                         if (day > maxDay) day = maxDay;
                         LocalDate normalized = LocalDate.of(def.getYear(), def.getMonthValue(), day);
                         JsonNode timesArr = dayNode.path("times");
@@ -530,6 +559,11 @@ public class TimeImportUseCase {
             LocalDate minD = out.stream().map(LocalDateTime::toLocalDate).min(LocalDate::compareTo).orElse(null);
             LocalDate maxD = out.stream().map(LocalDateTime::toLocalDate).max(LocalDate::compareTo).orElse(null);
             log.info("[IMPORT_IMAGE] parseGroqContent: extraídos {} horários, datas {} a {} (defaultDate usado foi {})", out.size(), minD, maxD, def);
+            int maxDayNum = maxD != null ? maxD.getDayOfMonth() : 0;
+            int daysInMonth = def.lengthOfMonth();
+            if (maxDayNum > 0 && maxDayNum < daysInMonth && daysInMonth > 1) {
+                log.info("[IMPORT_IMAGE] Último dia extraído: {}. Mês tem {} dias. Se a folha tinha mais dias com dados, reimporte ou verifique truncamento da resposta.", maxDayNum, daysInMonth);
+            }
         } else {
             log.warn("[IMPORT_IMAGE] parseGroqContent: nenhum horário extraído do JSON/array. Tentando fallback por regex.");
         }
