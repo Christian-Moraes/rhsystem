@@ -313,16 +313,16 @@ public class TimeImportUseCase {
                 + "Extraia TODAS as batidas (horários) agrupadas por DATA.\n\n"
                 + "REGRAS GLOBAIS — valem para QUALQUER tipo de ponto; siga sempre o que está na imagem:\n"
                 + "(1) MÊS E ANO: Use o mês e o ano indicados na folha (ex.: Janeiro, Fevereiro, 01/2026, Mês/Ano, cabeçalho, etc.).\n"
-                + "(2) DIAS: Identifique a coluna ou célula que traz o número do DIA (1 a 31). Pode ser \"Dia\", \"Data\", primeira coluna, etc. "
-                + "Use exatamente os dias que aparecem na tabela — não assuma período (pode ser 1–15, 16–31, 1–31 ou outro).\n"
+                + "(2) DIAS: A primeira coluna da tabela (ou coluna \"Dia\") contém o número do dia (1 a 31). "
+                + "O campo \"date\" de cada objeto deve ser exatamente esse dia: ex. linha com 15 na coluna dia → date \"YYYY-MM-15\". Uma linha da tabela = um objeto; não pule linhas nem atribua horários de um dia a outro.\n"
                 + "(3) LINHAS: Para cada linha que tiver PELO MENOS UM horário preenchido, inclua esse dia no JSON. "
-                + "Inclua a PRIMEIRA e a ÚLTIMA linha da tabela que tiverem dados (não omita o primeiro nem o último dia). Não pare antes do fim da tabela. Linha totalmente em branco = não inclua.\n"
+                + "Inclua a PRIMEIRA e a ÚLTIMA linha da tabela que tiverem dados (ex.: 1ª quinzena até dia 15, 2ª até dia 28/29/30/31). Não pare antes do fim da tabela. Linha totalmente em branco = não inclua.\n"
                 + "(4) HORÁRIOS: Em cada linha, leia os horários NA ORDEM em que aparecem (da esquerda para a direita). "
                 + "Cada dia pode ter 2, 4, 6 ou mais horários conforme o layout (entrada/saída, manhã/tarde, extra, etc.). "
                 + "Formato HH:mm em 24h. Célula vazia = não inclua na lista \"times\".\n\n"
                 + "Responda APENAS um JSON válido, sem markdown:\n"
                 + "{\"days\":[{\"date\":\"YYYY-MM-DD\",\"times\":[\"HH:mm\",\"HH:mm\",...]},...]}\n"
-                + "Não invente datas nem horários. Inclua todos os dias que tiverem pelo menos um horário. Lista completa.";
+                + "Alternativa: pode usar \"day\": N (número 1-31) em vez de \"date\". Não invente datas nem horários. Inclua todos os dias que tiverem pelo menos um horário. Lista completa.";
         log.debug("[IMPORT_IMAGE] Prompt enviado à IA (primeiros 500 chars): {}", prompt.length() > 500 ? prompt.substring(0, 500) + "..." : prompt);
         List<String> modelsToTry = new ArrayList<>();
         if (groqModel != null && !groqModel.isBlank()) {
@@ -478,6 +478,7 @@ public class TimeImportUseCase {
                 JsonNode obj = objectMapper.readTree(text);
                 JsonNode days = obj.path("days");
                 if (days.isArray()) {
+                    List<Integer> parsedDays = new ArrayList<>();
                     for (JsonNode dayNode : days) {
                         int day = -1;
                         String ds = dayNode.path("date").asText(null);
@@ -504,6 +505,7 @@ public class TimeImportUseCase {
                         if (day < 1) day = 1;
                         int maxDay = def.lengthOfMonth();
                         if (day > maxDay) day = maxDay;
+                        parsedDays.add(day);
                         LocalDate normalized = LocalDate.of(def.getYear(), def.getMonthValue(), day);
                         JsonNode timesArr = dayNode.path("times");
                         if (timesArr.isArray()) {
@@ -512,6 +514,9 @@ public class TimeImportUseCase {
                                 if (lt != null) out.add(LocalDateTime.of(normalized, lt));
                             }
                         }
+                    }
+                    if (!parsedDays.isEmpty()) {
+                        log.info("[IMPORT_IMAGE] parseGroqContent: dias no JSON (days[]): {}", parsedDays);
                     }
                 }
             } catch (Exception ignored) { }
@@ -526,15 +531,24 @@ public class TimeImportUseCase {
                         if (lt != null) out.add(LocalDateTime.of(def, lt));
                     } else if (el.isObject()) {
                         String ds = el.path("date").asText(null);
-                        int day = def.getDayOfMonth();
+                        int day = -1;
                         if (ds != null && ds.length() >= 10) {
                             try {
-                                LocalDate parsed = LocalDate.parse(ds.substring(0, 10));
-                                day = parsed.getDayOfMonth();
+                                String part = ds.substring(0, 10);
+                                if (part.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                                    day = LocalDate.parse(part).getDayOfMonth();
+                                } else if (part.matches("\\d{2}/\\d{2}/\\d{4}")) {
+                                    String[] d = part.split("/");
+                                    day = Integer.parseInt(d[0]);
+                                }
                             } catch (Exception ignored) { }
                         }
+                        if (day < 1 || day > 31) {
+                            JsonNode dayNum = el.path("day");
+                            if (!dayNum.isMissingNode() && dayNum.isNumber()) day = dayNum.asInt();
+                        }
+                        if (day < 1) day = def.getDayOfMonth();
                         int maxDay = def.lengthOfMonth();
-                        if (day < 1) day = 1;
                         if (day > maxDay) day = maxDay;
                         LocalDate normalized = LocalDate.of(def.getYear(), def.getMonthValue(), day);
 
@@ -563,6 +577,9 @@ public class TimeImportUseCase {
             int daysInMonth = def.lengthOfMonth();
             if (maxDayNum > 0 && maxDayNum < daysInMonth && daysInMonth > 1) {
                 log.info("[IMPORT_IMAGE] Último dia extraído: {}. Mês tem {} dias. Se a folha tinha mais dias com dados, reimporte ou verifique truncamento da resposta.", maxDayNum, daysInMonth);
+            }
+            if (maxDayNum == 14 && daysInMonth >= 15) {
+                log.warn("[IMPORT_IMAGE] Último dia é 14 — possível 1ª quinzena sem dia 15. Verifique se a IA incluiu o dia 15 no JSON (veja log 'dias no JSON').");
             }
         } else {
             log.warn("[IMPORT_IMAGE] parseGroqContent: nenhum horário extraído do JSON/array. Tentando fallback por regex.");
