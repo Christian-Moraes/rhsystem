@@ -1,5 +1,6 @@
 package com.rhsystem.application.dto;
 
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -7,11 +8,13 @@ import jakarta.validation.constraints.NotNull;
 /**
  * DTO para criar escalas de trabalho.
  * Horários devem vir no formato "HH:mm" (ex.: "14:00").
+ * {@code dailyHours} = horas de jornada por dia (ex.: 8), convertidas para minutos na persistência.
  */
 public class WorkScheduleRequest {
 
     @NotNull(message = "dailyHours é obrigatório")
-    @Min(value = 1, message = "dailyHours deve ser positivo")
+    @Min(value = 1, message = "Informe pelo menos 1 hora de jornada por dia")
+    @Max(value = 24, message = "Jornada diária não pode ultrapassar 24 horas")
     private Integer dailyHours;
 
     @NotBlank(message = "entryTime é obrigatório (HH:mm)")

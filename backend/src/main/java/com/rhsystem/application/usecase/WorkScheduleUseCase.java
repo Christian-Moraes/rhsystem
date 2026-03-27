@@ -40,7 +40,8 @@ public class WorkScheduleUseCase {
         WorkSchedule schedule = new WorkSchedule();
         schedule.setId(null); // será gerado pelo JPA
         schedule.setCompanyId(companyId);
-        schedule.setDailyHours(request.getDailyHours());
+        // Domínio/banco: minutos (ex.: 8h → 480). API recebe horas inteiras.
+        schedule.setDailyHours(request.getDailyHours() * 60);
         schedule.setEntryTime(parseTime(request.getEntryTime()));
         schedule.setExitTime(parseTime(request.getExitTime()));
         schedule.setBreakMinutes(request.getBreakMinutes());
@@ -59,7 +60,8 @@ public class WorkScheduleUseCase {
     private WorkScheduleResponse toResponse(WorkSchedule schedule) {
         WorkScheduleResponse response = new WorkScheduleResponse();
         response.setId(schedule.getId());
-        response.setDailyHours(schedule.getDailyHours());
+        Integer minutes = schedule.getDailyHours();
+        response.setDailyHours(minutes == null ? null : minutes / 60);
         response.setEntryTime(schedule.getEntryTime() != null ? schedule.getEntryTime().format(DateTimeFormatter.ofPattern("HH:mm")) : null);
         response.setExitTime(schedule.getExitTime() != null ? schedule.getExitTime().format(DateTimeFormatter.ofPattern("HH:mm")) : null);
         response.setBreakMinutes(schedule.getBreakMinutes());

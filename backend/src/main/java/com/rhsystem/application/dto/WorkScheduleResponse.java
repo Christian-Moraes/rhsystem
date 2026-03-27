@@ -4,6 +4,7 @@ import java.util.UUID;
 
 public class WorkScheduleResponse {
     private UUID id;
+    /** Horas de jornada por dia (valor humano; no banco a escala guarda minutos). */
     private Integer dailyHours;
     private String entryTime; // HH:mm
     private String exitTime;  // HH:mm
