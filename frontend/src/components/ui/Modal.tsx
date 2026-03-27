@@ -51,40 +51,44 @@ export default function Modal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto"
-      onClick={onClose}
-    >
-      <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+    <div className="fixed inset-0 z-50 overflow-y-auto">
+      <div
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div className="relative flex min-h-full items-center justify-center p-4 pb-8 sm:p-6 sm:pb-10">
         <div
-          className="fixed inset-0 transition-opacity bg-black/50 backdrop-blur-sm"
-          onClick={onClose}
-        />
-        <div
+          role="dialog"
+          aria-modal="true"
           className={`
-            inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-2xl transform transition-all sm:my-8 sm:align-middle w-full ${sizes[size]}
+            relative w-full ${sizes[size]} max-h-[min(90vh,calc(100dvh-2rem))] flex flex-col
+            bg-white rounded-xl text-left overflow-hidden shadow-2xl
           `}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="px-6 pt-6 pb-4">
-            <div className="flex items-start justify-between mb-4">
-              <div className="flex-1">
+          <div className="shrink-0 px-6 pt-6 pb-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
                 <h3 className="text-xl font-semibold text-gray-900">{title}</h3>
                 {description && (
                   <p className="mt-1 text-sm text-gray-500">{description}</p>
                 )}
               </div>
               <button
+                type="button"
                 onClick={onClose}
-                className="ml-4 text-gray-400 hover:text-gray-500 transition-colors"
+                className="shrink-0 text-gray-400 hover:text-gray-500 transition-colors"
               >
                 <XIcon />
               </button>
             </div>
-            <div className="mt-4">{children}</div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-4 border-t border-gray-100">
+            {children}
           </div>
           {footer && (
-            <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end space-x-3">
+            <div className="shrink-0 px-6 py-4 bg-gray-50 border-t border-gray-200 flex flex-wrap justify-end gap-3">
               {footer}
             </div>
           )}

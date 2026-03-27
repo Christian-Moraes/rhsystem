@@ -6,6 +6,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,22 @@ import java.util.Map;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /**
+     * Spring Boot 3.2+: URL sem controller correspondente vira esta exceção (mensagem tipo "No static resource ...").
+     * Sem handler dedicado, caía em {@link #handleGenericException} e virava 500.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Map<String, String>> handleNoResourceFound(NoResourceFoundException ex) {
+        Map<String, String> error = new HashMap<>();
+        error.put("message", "Rota não encontrada no servidor");
+        error.put(
+                "detail",
+                ex.getMessage()
+                        + " — Se você acabou de atualizar o código, reconstrua e suba de novo o backend "
+                        + "(ex.: docker compose build backend && docker compose up -d backend).");
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> handleValidationExceptions(MethodArgumentNotValidException ex) {

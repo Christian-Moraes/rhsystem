@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { employeeService, Employee, EmployeeRequest } from '../services/employeeService'
@@ -17,11 +17,73 @@ import Badge from '../components/ui/Badge'
 import CompanySelect from '../components/ui/CompanySelect'
 import { PlusIcon, EditIcon, TrashIcon, DocumentIcon, UsersIcon, BuildingIcon } from '../components/icons'
 
-function formatWorkScheduleLabel(s: WorkSchedule): string {
-  return `${s.entryTime} – ${s.exitTime} (${s.dailyHours}h/dia)`
+/** Texto curto só com horários (lista / tabela). */
+function formatWorkScheduleShort(s: WorkSchedule): string {
+  return `${s.entryTime}–${s.exitTime} · ${s.dailyHours}h`
 }
 
-function defaultNewScheduleForm(): WorkScheduleCreateRequest {
+/**
+ * Rótulo legível para o select (sem ID). Índice 1-based para o RH achar “Jornada 1, 2…”.
+ */
+function formatScheduleOptionLabel(s: WorkSchedule, indexOneBased: number): string {
+  return `Jornada ${indexOneBased}: das ${s.entryTime} às ${s.exitTime} · ${s.dailyHours} h/dia · intervalo ${s.breakMinutes} min · tolerância atraso ${s.toleranceLate} min · saída ${s.toleranceLeave} min`
+}
+
+function ScheduleSummaryHero({
+  schedule,
+  badge,
+}: {
+  schedule: WorkSchedule
+  badge?: string
+}) {
+  return (
+    <div className="rounded-xl border border-blue-100 bg-gradient-to-br from-blue-50/90 to-white px-4 py-4 sm:px-5">
+      {badge && (
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-700/90 mb-2">{badge}</p>
+      )}
+      <div className="flex flex-wrap items-end gap-6 sm:gap-10">
+        <div>
+          <p className="text-xs font-medium text-gray-500 mb-0.5">Entrada</p>
+          <p className="text-2xl sm:text-3xl font-semibold tabular-nums text-gray-900 tracking-tight">
+            {schedule.entryTime}
+          </p>
+        </div>
+        <div className="hidden sm:block text-gray-300 pb-1 text-2xl font-light">→</div>
+        <div>
+          <p className="text-xs font-medium text-gray-500 mb-0.5">Saída</p>
+          <p className="text-2xl sm:text-3xl font-semibold tabular-nums text-gray-900 tracking-tight">
+            {schedule.exitTime}
+          </p>
+        </div>
+      </div>
+      <p className="mt-3 text-sm text-gray-600">
+        <span className="font-medium text-gray-800">{schedule.dailyHours} horas por dia</span>
+        <span className="text-gray-400 mx-2">·</span>
+        intervalo {schedule.breakMinutes} min
+        <span className="text-gray-400 mx-2">·</span>
+        tolerância atraso {schedule.toleranceLate} min
+        <span className="text-gray-400 mx-2">·</span>
+        tolerância saída {schedule.toleranceLeave} min
+      </p>
+    </div>
+  )
+}
+
+function scheduleIdsEqual(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+/** Campos numéricos podem ficar vazios enquanto o usuário apaga e redigita (evita travar em 0). */
+type NewScheduleFormState = {
+  dailyHours: number | ''
+  breakMinutes: number | ''
+  entryTime: string
+  exitTime: string
+  toleranceLate: number | ''
+  toleranceLeave: number | ''
+}
+
+function defaultNewScheduleForm(): NewScheduleFormState {
   return {
     dailyHours: 8,
     entryTime: '09:00',
@@ -30,6 +92,13 @@ function defaultNewScheduleForm(): WorkScheduleCreateRequest {
     toleranceLate: 15,
     toleranceLeave: 15,
   }
+}
+
+/** Aceita campo vazio durante a edição; string numérica vira inteiro (0 permitido para tolerâncias). */
+function parseOptionalIntField(raw: string): number | '' {
+  if (raw === '') return ''
+  const n = parseInt(raw, 10)
+  return Number.isNaN(n) ? '' : n
 }
 
 export default function Employees() {
@@ -46,7 +115,7 @@ export default function Employees() {
     workScheduleId: '',
   })
   const [showNewSchedule, setShowNewSchedule] = useState(false)
-  const [newScheduleForm, setNewScheduleForm] = useState<WorkScheduleCreateRequest>(() =>
+  const [newScheduleForm, setNewScheduleForm] = useState<NewScheduleFormState>(() =>
     defaultNewScheduleForm()
   )
 
@@ -56,7 +125,7 @@ export default function Employees() {
     enabled: !!selectedCompanyId,
   })
 
-  const { data: workSchedules = [] } = useQuery({
+  const { data: workSchedules = [], isLoading: schedulesLoading } = useQuery({
     queryKey: ['work-schedules', selectedCompanyId],
     queryFn: () => workScheduleService.getAll(selectedCompanyId),
     enabled: !!selectedCompanyId,
@@ -125,12 +194,13 @@ export default function Employees() {
 
   const handleEdit = (employee: Employee) => {
     setEditingEmployee(employee)
+    const wid = employee.workScheduleId
     setFormData({
       name: employee.name,
       cpf: employee.cpf,
       role: employee.role || '',
       hireDate: employee.hireDate,
-      workScheduleId: employee.workScheduleId || '',
+      workScheduleId: wid != null && wid !== '' ? String(wid) : '',
     })
     setShowModal(true)
   }
@@ -161,14 +231,73 @@ export default function Employees() {
       showToast('Selecione uma empresa', 'error')
       return
     }
-    createScheduleMutation.mutate({ ...newScheduleForm })
+    const f = newScheduleForm
+    if (
+      f.dailyHours === '' ||
+      f.breakMinutes === '' ||
+      f.toleranceLate === '' ||
+      f.toleranceLeave === ''
+    ) {
+      showToast('Preencha todos os campos numéricos da jornada (incluindo tolerâncias).', 'error')
+      return
+    }
+    const payload: WorkScheduleCreateRequest = {
+      dailyHours: Number(f.dailyHours),
+      breakMinutes: Number(f.breakMinutes),
+      entryTime: f.entryTime,
+      exitTime: f.exitTime,
+      toleranceLate: Number(f.toleranceLate),
+      toleranceLeave: Number(f.toleranceLeave),
+    }
+    if (payload.dailyHours < 1) {
+      showToast('Horas por dia deve ser no mínimo 1.', 'error')
+      return
+    }
+    createScheduleMutation.mutate(payload)
   }
 
   const scheduleLabelForRow = (workScheduleId?: string) => {
-    if (!workScheduleId) return 'Padrão da empresa'
-    const s = workSchedules.find((w) => w.id === workScheduleId)
-    return s ? formatWorkScheduleLabel(s) : workScheduleId.slice(0, 8) + '…'
+    if (!workScheduleId) return 'Jornada da empresa (sem vínculo)'
+    const s = workSchedules.find((w) => scheduleIdsEqual(w.id, workScheduleId))
+    return s ? formatWorkScheduleShort(s) : 'Jornada não encontrada na lista'
   }
+
+  const selectedScheduleId = useMemo(() => {
+    const id = formData.workScheduleId
+    if (id == null || id === '') return ''
+    return String(id).trim()
+  }, [formData.workScheduleId])
+
+  const linkedSchedule = useMemo(() => {
+    if (!selectedScheduleId) return null
+    return workSchedules.find((w) => scheduleIdsEqual(w.id, selectedScheduleId)) ?? null
+  }, [workSchedules, selectedScheduleId])
+
+  const hasOrphanSchedule =
+    !!selectedCompanyId &&
+    !schedulesLoading &&
+    !!selectedScheduleId &&
+    linkedSchedule === null
+
+  const defaultCompanySchedule = workSchedules[0] ?? null
+
+  /** Horários que o RH enxerga: escala vinculada ao funcionário, ou referência do «padrão» (1ª da empresa). */
+  const displaySchedule = useMemo((): WorkSchedule | null => {
+    if (linkedSchedule) return linkedSchedule
+    if (!selectedScheduleId && defaultCompanySchedule) return defaultCompanySchedule
+    return null
+  }, [linkedSchedule, selectedScheduleId, defaultCompanySchedule])
+
+  const scheduleSelectValue =
+    formData.workScheduleId == null || formData.workScheduleId === ''
+      ? ''
+      : String(formData.workScheduleId)
+
+  const hasAnyCompanySchedule = workSchedules.length > 0
+
+  const defaultOptionLabel = defaultCompanySchedule
+    ? `Mesma jornada da empresa para todos (não fixa no funcionário) — hoje equivale a: das ${defaultCompanySchedule.entryTime} às ${defaultCompanySchedule.exitTime}, ${defaultCompanySchedule.dailyHours} h/dia`
+    : ''
 
   return (
     <div className="space-y-6">
@@ -225,7 +354,7 @@ export default function Employees() {
               </div>
             ) : (
               <Table
-                headers={['Nome', 'CPF', 'Cargo', 'Escala', 'Status', 'Ações']}
+                headers={['Nome', 'CPF', 'Cargo', 'Jornada', 'Status', 'Ações']}
                 emptyMessage="Nenhum funcionário encontrado"
               >
                 {employees.map((employee) => (
@@ -330,165 +459,367 @@ export default function Employees() {
           </div>
         }
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-5">
           {!editingEmployee && (
             <CompanySelect
               label="Empresa"
               value={selectedCompanyId}
               onChange={(id) => {
                 setSelectedCompanyId(id)
+                setFormData((prev) => ({ ...prev, workScheduleId: null }))
               }}
               required
             />
           )}
-          <Input
-            label="Nome Completo"
-            value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            required
-            placeholder="João Silva"
-          />
-          <Input
-            label="CPF"
-            value={formData.cpf}
-            onChange={(e) => setFormData({ ...formData, cpf: e.target.value })}
-            required
-            placeholder="000.000.000-00"
-          />
-          <Input
-            label="Cargo"
-            value={formData.role}
-            onChange={(e) => setFormData({ ...formData, role: e.target.value })}
-            placeholder="Desenvolvedor"
-          />
-          <Input
-            label="Data de Admissão"
-            type="date"
-            value={formData.hireDate}
-            onChange={(e) => setFormData({ ...formData, hireDate: e.target.value })}
-            required
-          />
 
-          {selectedCompanyId && (
-            <>
-              <div className="w-full">
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  Escala de trabalho
-                </label>
-                <select
-                  className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                  value={typeof formData.workScheduleId === 'string' ? formData.workScheduleId : ''}
-                  onChange={(e) =>
-                    setFormData({ ...formData, workScheduleId: e.target.value || null })
-                  }
-                >
-                  <option value="">Padrão da empresa (primeira escala cadastrada)</option>
-                  {workSchedules.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {formatWorkScheduleLabel(s)} · atraso ±{s.toleranceLate} min
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1.5 text-xs text-gray-500">
-                  Sem escala específica, o sistema usa a regra da empresa para entrada e tolerância.
+          <div className="space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Jornada de trabalho</h3>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                Aqui você define <span className="font-medium text-gray-700">que horários</span> o sistema
+                usa para atraso e fechamento. Tudo é descrito em horário e minutos — não é preciso decorar
+                código nem ID.
+              </p>
+            </div>
+
+            {!selectedCompanyId ? (
+              <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                {editingEmployee
+                  ? 'Selecione a empresa no filtro da página para carregar as jornadas cadastradas.'
+                  : 'Primeiro escolha a empresa acima; em seguida você cadastra ou escolhe a jornada.'}
+              </div>
+            ) : schedulesLoading ? (
+              <p className="text-sm text-gray-500 py-2">Carregando jornadas desta empresa…</p>
+            ) : !hasAnyCompanySchedule ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-4 space-y-3">
+                <p className="text-sm font-medium text-amber-950">
+                  Esta empresa ainda não tem nenhuma jornada cadastrada
                 </p>
-              </div>
-
-              <div className="border border-gray-200 rounded-lg p-3 bg-gray-50/80">
-                <button
-                  type="button"
-                  onClick={() => setShowNewSchedule((v) => !v)}
-                  className="text-sm font-medium text-blue-600 hover:text-blue-800"
-                >
-                  {showNewSchedule ? 'Ocultar nova escala' : '+ Criar nova escala nesta empresa'}
-                </button>
-                {showNewSchedule && (
-                  <div className="mt-3 space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
-                      <Input
-                        label="Horas/dia"
-                        type="number"
-                        min={1}
-                        value={newScheduleForm.dailyHours}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({
-                            ...f,
-                            dailyHours: Number(e.target.value) || 0,
-                          }))
-                        }
-                        required
-                      />
-                      <Input
-                        label="Intervalo (min)"
-                        type="number"
-                        min={0}
-                        value={newScheduleForm.breakMinutes}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({
-                            ...f,
-                            breakMinutes: Number(e.target.value) || 0,
-                          }))
-                        }
-                        required
-                      />
-                      <Input
-                        label="Entrada"
-                        type="time"
-                        value={newScheduleForm.entryTime}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({ ...f, entryTime: e.target.value }))
-                        }
-                        required
-                      />
-                      <Input
-                        label="Saída"
-                        type="time"
-                        value={newScheduleForm.exitTime}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({ ...f, exitTime: e.target.value }))
-                        }
-                        required
-                      />
-                      <Input
-                        label="Tolerância atraso (min)"
-                        type="number"
-                        min={0}
-                        value={newScheduleForm.toleranceLate}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({
-                            ...f,
-                            toleranceLate: Number(e.target.value) || 0,
-                          }))
-                        }
-                        required
-                      />
-                      <Input
-                        label="Tolerância saída (min)"
-                        type="number"
-                        min={0}
-                        value={newScheduleForm.toleranceLeave}
-                        onChange={(e) =>
-                          setNewScheduleForm((f) => ({
-                            ...f,
-                            toleranceLeave: Number(e.target.value) || 0,
-                          }))
-                        }
-                        required
-                      />
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      isLoading={createScheduleMutation.isPending}
-                      onClick={handleCreateSchedule}
-                    >
-                      Salvar escala e selecionar
-                    </Button>
+                <p className="text-sm text-amber-900/90 leading-relaxed">
+                  Sem isso, não dá para mostrar entrada e saída. Preencha os horários abaixo e salve: a
+                  jornada fica guardada na empresa e já pode ser usada neste funcionário.
+                </p>
+                <div className="rounded-lg border border-amber-100/80 bg-white p-3 space-y-3">
+                  <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+                    Cadastrar primeira jornada
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input
+                      label="Horas/dia"
+                      type="number"
+                      min={1}
+                      value={newScheduleForm.dailyHours === '' ? '' : newScheduleForm.dailyHours}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({
+                          ...f,
+                          dailyHours: parseOptionalIntField(e.target.value),
+                        }))
+                      }
+                      required
+                    />
+                    <Input
+                      label="Intervalo (min)"
+                      type="number"
+                      min={0}
+                      value={newScheduleForm.breakMinutes === '' ? '' : newScheduleForm.breakMinutes}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({
+                          ...f,
+                          breakMinutes: parseOptionalIntField(e.target.value),
+                        }))
+                      }
+                      required
+                    />
+                    <Input
+                      label="Entrada"
+                      type="time"
+                      value={newScheduleForm.entryTime}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({ ...f, entryTime: e.target.value }))
+                      }
+                      required
+                    />
+                    <Input
+                      label="Saída"
+                      type="time"
+                      value={newScheduleForm.exitTime}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({ ...f, exitTime: e.target.value }))
+                      }
+                      required
+                    />
+                    <Input
+                      label="Tolerância atraso (min)"
+                      type="number"
+                      min={0}
+                      value={newScheduleForm.toleranceLate === '' ? '' : newScheduleForm.toleranceLate}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({
+                          ...f,
+                          toleranceLate: parseOptionalIntField(e.target.value),
+                        }))
+                      }
+                      required
+                    />
+                    <Input
+                      label="Tolerância saída (min)"
+                      type="number"
+                      min={0}
+                      value={newScheduleForm.toleranceLeave === '' ? '' : newScheduleForm.toleranceLeave}
+                      onChange={(e) =>
+                        setNewScheduleForm((f) => ({
+                          ...f,
+                          toleranceLeave: parseOptionalIntField(e.target.value),
+                        }))
+                      }
+                      required
+                    />
                   </div>
-                )}
+                  <Button
+                    type="button"
+                    isLoading={createScheduleMutation.isPending}
+                    onClick={handleCreateSchedule}
+                  >
+                    Salvar jornada e usar neste funcionário
+                  </Button>
+                </div>
               </div>
-            </>
-          )}
+            ) : (
+              <>
+                <div className="w-full space-y-2">
+                  <label className="block text-sm font-medium text-gray-800">
+                    Qual jornada este funcionário segue?
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    Cada linha descreve horário de entrada, saída e regras. Escolha uma ou deixe a opção da
+                    empresa se ele não tiver jornada fixa no cadastro.
+                  </p>
+                  <select
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    value={scheduleSelectValue}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setFormData((prev) => ({ ...prev, workScheduleId: v ? v : null }))
+                    }}
+                  >
+                    <option value="">{defaultOptionLabel}</option>
+                    {workSchedules.map((s, idx) => (
+                      <option key={s.id} value={s.id}>
+                        {formatScheduleOptionLabel(s, idx + 1)}
+                      </option>
+                    ))}
+                    {hasOrphanSchedule && (
+                      <option value={selectedScheduleId}>
+                        Manter jornada já salva no funcionário (não aparece na lista da empresa — escolha
+                        outra linha se quiser trocar)
+                      </option>
+                    )}
+                  </select>
+                </div>
+
+                {hasOrphanSchedule && (
+                  <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-relaxed">
+                    O cadastro deste funcionário aponta para uma jornada que não está entre as da empresa.
+                    Selecione uma das jornadas listadas acima para alinhar, ou mantenha esta opção e salve
+                    só se souber que o registro ainda é válido.
+                  </p>
+                )}
+
+                {displaySchedule && (
+                  <>
+                    <ScheduleSummaryHero
+                      schedule={displaySchedule}
+                      badge={
+                        linkedSchedule
+                          ? 'Jornada fixada neste funcionário'
+                          : 'Prévia — jornada da empresa (sem fixar no funcionário)'
+                      }
+                    />
+                    <div className="rounded-lg border border-gray-200 bg-gray-50/80 p-3 space-y-2">
+                      <p className="text-xs font-medium text-gray-600">
+                        Mesmos horários em formato de formulário (só leitura)
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Input
+                          label="Horas/dia"
+                          readOnly
+                          tabIndex={-1}
+                          value={String(displaySchedule.dailyHours)}
+                          className="bg-white cursor-default"
+                        />
+                        <Input
+                          label="Intervalo (min)"
+                          readOnly
+                          tabIndex={-1}
+                          value={String(displaySchedule.breakMinutes)}
+                          className="bg-white cursor-default"
+                        />
+                        <Input
+                          label="Entrada"
+                          type="time"
+                          readOnly
+                          tabIndex={-1}
+                          value={displaySchedule.entryTime}
+                          className="bg-white cursor-default"
+                        />
+                        <Input
+                          label="Saída"
+                          type="time"
+                          readOnly
+                          tabIndex={-1}
+                          value={displaySchedule.exitTime}
+                          className="bg-white cursor-default"
+                        />
+                        <Input
+                          label="Tolerância atraso (min)"
+                          readOnly
+                          tabIndex={-1}
+                          value={String(displaySchedule.toleranceLate)}
+                          className="bg-white cursor-default"
+                        />
+                        <Input
+                          label="Tolerância saída (min)"
+                          readOnly
+                          tabIndex={-1}
+                          value={String(displaySchedule.toleranceLeave)}
+                          className="bg-white cursor-default"
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className="border border-gray-200 rounded-lg p-3 bg-white">
+                  <button
+                    type="button"
+                    onClick={() => setShowNewSchedule((v) => !v)}
+                    className="text-sm font-medium text-blue-600 hover:text-blue-800"
+                  >
+                    {showNewSchedule ? 'Fechar cadastro de nova jornada' : '+ Cadastrar outra jornada nesta empresa'}
+                  </button>
+                  {showNewSchedule && (
+                    <div className="mt-3 space-y-3 pt-3 border-t border-gray-100">
+                      <p className="text-xs text-gray-500">
+                        Use quando existir turno diferente (ex.: comercial x plantão). Depois de salvar, ela
+                        aparece na lista acima.
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Input
+                          label="Horas/dia"
+                          type="number"
+                          min={1}
+                          value={newScheduleForm.dailyHours === '' ? '' : newScheduleForm.dailyHours}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({
+                              ...f,
+                              dailyHours: parseOptionalIntField(e.target.value),
+                            }))
+                          }
+                          required
+                        />
+                        <Input
+                          label="Intervalo (min)"
+                          type="number"
+                          min={0}
+                          value={newScheduleForm.breakMinutes === '' ? '' : newScheduleForm.breakMinutes}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({
+                              ...f,
+                              breakMinutes: parseOptionalIntField(e.target.value),
+                            }))
+                          }
+                          required
+                        />
+                        <Input
+                          label="Entrada"
+                          type="time"
+                          value={newScheduleForm.entryTime}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({ ...f, entryTime: e.target.value }))
+                          }
+                          required
+                        />
+                        <Input
+                          label="Saída"
+                          type="time"
+                          value={newScheduleForm.exitTime}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({ ...f, exitTime: e.target.value }))
+                          }
+                          required
+                        />
+                        <Input
+                          label="Tolerância atraso (min)"
+                          type="number"
+                          min={0}
+                          value={newScheduleForm.toleranceLate === '' ? '' : newScheduleForm.toleranceLate}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({
+                              ...f,
+                              toleranceLate: parseOptionalIntField(e.target.value),
+                            }))
+                          }
+                          required
+                        />
+                        <Input
+                          label="Tolerância saída (min)"
+                          type="number"
+                          min={0}
+                          value={newScheduleForm.toleranceLeave === '' ? '' : newScheduleForm.toleranceLeave}
+                          onChange={(e) =>
+                            setNewScheduleForm((f) => ({
+                              ...f,
+                              toleranceLeave: parseOptionalIntField(e.target.value),
+                            }))
+                          }
+                          required
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        isLoading={createScheduleMutation.isPending}
+                        onClick={handleCreateSchedule}
+                      >
+                        Salvar nova jornada e selecionar para este funcionário
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="space-y-4 pt-1 border-t border-gray-100">
+            <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Dados do funcionário</p>
+            <Input
+              label="Nome Completo"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              required
+              placeholder="João Silva"
+            />
+            <Input
+              label="CPF"
+              value={formData.cpf}
+              onChange={(e) => setFormData({ ...formData, cpf: e.target.value })}
+              required
+              placeholder="000.000.000-00"
+            />
+            <Input
+              label="Cargo"
+              value={formData.role}
+              onChange={(e) => setFormData({ ...formData, role: e.target.value })}
+              placeholder="Desenvolvedor"
+            />
+            <Input
+              label="Data de Admissão"
+              type="date"
+              value={formData.hireDate}
+              onChange={(e) => setFormData({ ...formData, hireDate: e.target.value })}
+              required
+            />
+          </div>
         </form>
       </Modal>
     </div>
