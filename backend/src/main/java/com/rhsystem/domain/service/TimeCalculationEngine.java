@@ -6,9 +6,16 @@ import com.rhsystem.domain.model.WorkSchedule;
 import com.rhsystem.domain.valueobject.TimeCalculationResult;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 @Service
@@ -23,27 +30,67 @@ public class TimeCalculationEngine {
             throw new IllegalArgumentException("WorkSchedule não pode ser nulo");
         }
 
-        // Agrupa eventos por data
+        int dailyMinutes = workSchedule.getDailyHours() != null ? workSchedule.getDailyHours() : 480;
+
+        // FIFO em todo o período: saída após meia-noite fica gravada no dia civil seguinte;
+        // parear só dentro do mesmo dia deixava E2 "sem saída" e a última saída antes da última entrada → 0h trabalhadas e atraso absurdo.
+        List<TimeEvent> sorted = events.stream()
+                .filter(e -> e.getEventType() == TimeEventType.ENTRY || e.getEventType() == TimeEventType.EXIT)
+                .sorted(Comparator.comparing(TimeEvent::getEventTime))
+                .collect(Collectors.toList());
+
+        ArrayDeque<LocalDateTime> openEntries = new ArrayDeque<>();
+        Map<LocalDate, Integer> workedByEntryDate = new HashMap<>();
+        for (TimeEvent ev : sorted) {
+            if (ev.getEventType() == TimeEventType.ENTRY) {
+                openEntries.addLast(ev.getEventTime());
+            } else {
+                if (!openEntries.isEmpty()) {
+                    LocalDateTime entryStart = openEntries.pollFirst();
+                    int segment = (int) Duration.between(entryStart, ev.getEventTime()).toMinutes();
+                    if (segment > 0) {
+                        LocalDate attributionDate = entryStart.toLocalDate();
+                        workedByEntryDate.merge(attributionDate, segment, Integer::sum);
+                    }
+                }
+            }
+        }
+
         Map<LocalDate, List<TimeEvent>> eventsByDate = events.stream()
-                .collect(Collectors.groupingBy(event -> event.getEventTime().toLocalDate()));
+                .collect(Collectors.groupingBy(e -> e.getEventTime().toLocalDate()));
+
+        TreeSet<LocalDate> datesToProcess = new TreeSet<>(eventsByDate.keySet());
+        datesToProcess.addAll(workedByEntryDate.keySet());
 
         int totalWorkedMinutes = 0;
         int totalExtraMinutes = 0;
         int totalDelayMinutes = 0;
         int totalAbsenceMinutes = 0;
 
-        for (Map.Entry<LocalDate, List<TimeEvent>> entry : eventsByDate.entrySet()) {
-            LocalDate date = entry.getKey();
-            List<TimeEvent> dayEvents = entry.getValue().stream()
-                    .sorted(Comparator.comparing(TimeEvent::getEventTime))
-                    .collect(Collectors.toList());
+        for (LocalDate date : datesToProcess) {
+            int workedDay = workedByEntryDate.getOrDefault(date, 0);
 
-            DayCalculation dayCalc = calculateDay(dayEvents, workSchedule, date);
-            
-            totalWorkedMinutes += dayCalc.workedMinutes;
-            totalExtraMinutes += dayCalc.extraMinutes;
-            totalDelayMinutes += dayCalc.delayMinutes;
-            totalAbsenceMinutes += dayCalc.absenceMinutes;
+            LocalTime firstEntryOfDay = eventsByDate.getOrDefault(date, List.of()).stream()
+                    .filter(e -> e.getEventType() == TimeEventType.ENTRY)
+                    .min(Comparator.comparing(TimeEvent::getEventTime))
+                    .map(e -> e.getEventTime().toLocalTime())
+                    .orElse(null);
+
+            if (workedDay <= 0) {
+                totalAbsenceMinutes += dailyMinutes;
+                continue;
+            }
+
+            int delayMinutes = firstEntryOfDay != null ? calculateDelay(firstEntryOfDay, workSchedule) : 0;
+            int extraMinutes = Math.max(0, workedDay - dailyMinutes);
+            int adjustedWorked = workedDay;
+            if (extraMinutes > 0) {
+                adjustedWorked = dailyMinutes;
+            }
+
+            totalWorkedMinutes += adjustedWorked;
+            totalExtraMinutes += extraMinutes;
+            totalDelayMinutes += delayMinutes;
         }
 
         return new TimeCalculationResult(
@@ -52,68 +99,6 @@ public class TimeCalculationEngine {
                 totalDelayMinutes,
                 totalAbsenceMinutes
         );
-    }
-
-    private DayCalculation calculateDay(List<TimeEvent> events, WorkSchedule schedule, LocalDate date) {
-        LocalTime entryTime = null;
-        LocalTime breakStartTime = null;
-        LocalTime breakEndTime = null;
-        LocalTime exitTime = null;
-
-        // Processa eventos em ordem cronológica
-        for (TimeEvent event : events) {
-            switch (event.getEventType()) {
-                case ENTRY:
-                    entryTime = event.getEventTime().toLocalTime();
-                    break;
-                case BREAK_START:
-                    breakStartTime = event.getEventTime().toLocalTime();
-                    break;
-                case BREAK_END:
-                    breakEndTime = event.getEventTime().toLocalTime();
-                    break;
-                case EXIT:
-                    exitTime = event.getEventTime().toLocalTime();
-                    break;
-            }
-        }
-
-        // Se não há entrada ou saída, considera ausência
-        if (entryTime == null || exitTime == null) {
-            int absenceMinutes = schedule.getDailyHours() != null ? schedule.getDailyHours() : 480; // 8 horas padrão
-            return new DayCalculation(0, 0, 0, absenceMinutes);
-        }
-
-        // Calcula tempo trabalhado
-        int workedMinutes = calculateWorkedMinutes(entryTime, exitTime, breakStartTime, breakEndTime);
-        
-        // Calcula atraso
-        int delayMinutes = calculateDelay(entryTime, schedule);
-        
-        // Calcula horas extras
-        int expectedMinutes = schedule.getDailyHours() != null ? schedule.getDailyHours() : 480;
-        int extraMinutes = Math.max(0, workedMinutes - expectedMinutes);
-        
-        // Ajusta horas trabalhadas se houver horas extras
-        int adjustedWorkedMinutes = workedMinutes;
-        if (extraMinutes > 0) {
-            adjustedWorkedMinutes = expectedMinutes;
-        }
-
-        return new DayCalculation(adjustedWorkedMinutes, extraMinutes, delayMinutes, 0);
-    }
-
-    private int calculateWorkedMinutes(LocalTime entry, LocalTime exit, 
-                                       LocalTime breakStart, LocalTime breakEnd) {
-        int totalMinutes = (int) java.time.Duration.between(entry, exit).toMinutes();
-        
-        // Subtrai o tempo de intervalo
-        if (breakStart != null && breakEnd != null) {
-            int breakMinutes = (int) java.time.Duration.between(breakStart, breakEnd).toMinutes();
-            totalMinutes -= breakMinutes;
-        }
-        
-        return Math.max(0, totalMinutes);
     }
 
     private int calculateDelay(LocalTime entryTime, WorkSchedule schedule) {
@@ -139,17 +124,4 @@ public class TimeCalculationEngine {
         return 0;
     }
 
-    private static class DayCalculation {
-        final int workedMinutes;
-        final int extraMinutes;
-        final int delayMinutes;
-        final int absenceMinutes;
-
-        DayCalculation(int workedMinutes, int extraMinutes, int delayMinutes, int absenceMinutes) {
-            this.workedMinutes = workedMinutes;
-            this.extraMinutes = extraMinutes;
-            this.delayMinutes = delayMinutes;
-            this.absenceMinutes = absenceMinutes;
-        }
-    }
 }

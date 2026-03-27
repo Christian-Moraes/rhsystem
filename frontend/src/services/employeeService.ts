@@ -16,7 +16,8 @@ export interface EmployeeRequest {
   cpf: string
   role?: string
   hireDate: string
-  workScheduleId?: string
+  /** UUID da escala; `null` remove vínculo (usa padrão da empresa). */
+  workScheduleId?: string | null
 }
 
 export const employeeService = {

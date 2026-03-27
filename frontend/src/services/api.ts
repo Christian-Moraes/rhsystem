@@ -27,8 +27,12 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
-    if (error.response?.status === 401) {
+    // Sem token ou token inválido: Spring costuma responder 403 em rotas protegidas (anônimo)
+    const status = error.response?.status
+    if (status === 401 || status === 403) {
       localStorage.removeItem('token')
+      localStorage.removeItem('user')
+      localStorage.removeItem('companies')
       localStorage.removeItem('selectedCompanyId')
       window.location.href = '/login'
     }

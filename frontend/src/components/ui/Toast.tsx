@@ -1,5 +1,4 @@
 import { useEffect } from 'react'
-import Badge from './Badge'
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 

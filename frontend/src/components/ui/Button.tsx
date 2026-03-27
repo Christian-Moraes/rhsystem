@@ -1,5 +1,4 @@
 import { ButtonHTMLAttributes, ReactNode } from 'react'
-import { PlusIcon } from '../icons'
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'danger' | 'outline' | 'ghost'

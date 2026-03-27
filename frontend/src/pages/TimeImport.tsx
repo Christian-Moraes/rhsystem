@@ -7,8 +7,6 @@ import { useCompany } from '../contexts/CompanyContext'
 import { useToast } from '../contexts/ToastContext'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
-import Input from '../components/ui/Input'
-import Badge from '../components/ui/Badge'
 
 export default function TimeImport() {
   const { selectedCompany } = useCompany()

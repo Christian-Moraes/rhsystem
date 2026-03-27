@@ -100,9 +100,15 @@ export default function TimesheetPage() {
         if (date.getMonth() + 1 !== month || date.getFullYear() !== year) continue
 
         const dayEvents = (byDay[dateStr] || []).sort((a, b) => a.time.localeCompare(b.time))
+        // IMPORTANT: o backend pode ter `event_type` invertido por histórico/importação.
+        // Para a grade continuar consistente com a UI (E1/S1/E2/S2), determinamos ENTRY/EXIT
+        // pela posição (ordem na tela), e não pelo event_type recebido do banco.
         const punchesFromApi =
           dayEvents.length > 0
-            ? dayEvents.map((e) => ({ type: e.type as 'ENTRY' | 'EXIT', time: e.time }))
+            ? dayEvents.map((e, idx) => ({
+                type: idx % 2 === 0 ? ('ENTRY' as const) : ('EXIT' as const),
+                time: e.time,
+              }))
             : [
                 { type: 'ENTRY' as const, time: '' },
                 { type: 'EXIT' as const, time: '' },
@@ -238,17 +244,25 @@ export default function TimesheetPage() {
       const eventsToCreate: TimeEventRequest[] = []
       for (const [dateStr, entry] of Object.entries(gradeData)) {
         const [y, m, d] = dateStr.split('-').map(Number)
-        const baseDate = new Date(y, m - 1, d)
+        const yStr = String(y).padStart(4, '0')
+        const mStr = String(m).padStart(2, '0')
+        const dStr = String(d).padStart(2, '0')
 
-        for (const punch of entry.punches) {
+        for (let idx = 0; idx < entry.punches.length; idx++) {
+          const punch = entry.punches[idx]
           if (!punch.time) continue
+          // `type="time"` pode retornar valores inesperados; só cria evento se estiver no formato HH:mm.
+          if (!/^\d{2}:\d{2}$/.test(punch.time)) continue
           const [h, min] = punch.time.split(':').map(Number)
-          const eventTime = new Date(baseDate)
-          eventTime.setHours(h, min, 0, 0)
+          const hStr = String(h).padStart(2, '0')
+          const minStr = String(min).padStart(2, '0')
+          // Envia sem timezone ("Z") para o backend tratar como LocalDateTime no mesmo relógio local.
+          const eventTimeLocal = `${yStr}-${mStr}-${dStr}T${hStr}:${minStr}:00`
+          const eventType = idx % 2 === 0 ? 'ENTRY' : 'EXIT'
           eventsToCreate.push({
             employeeId: selectedEmployeeId,
-            eventType: punch.type,
-            eventTime: eventTime.toISOString(),
+            eventType,
+            eventTime: eventTimeLocal,
           })
         }
       }
@@ -445,17 +459,6 @@ export default function TimesheetPage() {
                   {selectedCompany?.name} · {monthName}/{year}
                 </p>
               </div>
-              {hasUnsavedChanges && (
-                <Button
-                  type="button"
-                  onClick={() => saveGradeMutation.mutate()}
-                  disabled={saveGradeMutation.isPending}
-                  isLoading={saveGradeMutation.isPending}
-                  variant="outline"
-                >
-                  Salvar Grade
-                </Button>
-              )}
             </div>
           </div>
 
@@ -684,6 +687,20 @@ export default function TimesheetPage() {
           <Card
             title={`Grade de Ponto — ${selectedEmployee?.name || 'Funcionário'} | ${monthName}/${year}`}
             description="Edite diretamente na grade. Mínimo 4 campos (E1/S1/E2/S2), pode adicionar mais batidas."
+            actions={
+              hasUnsavedChanges ? (
+                <Button
+                  type="button"
+                  onClick={() => saveGradeMutation.mutate()}
+                  disabled={saveGradeMutation.isPending}
+                  isLoading={saveGradeMutation.isPending}
+                  variant="outline"
+                  size="sm"
+                >
+                  Salvar Grade
+                </Button>
+              ) : null
+            }
           >
             <div className="max-h-[500px] overflow-y-auto rounded-lg border border-gray-200">
               <table className="w-full border-collapse text-sm">

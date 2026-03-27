@@ -4,9 +4,10 @@ import com.rhsystem.application.dto.EmployeeRequest;
 import com.rhsystem.application.dto.EmployeeResponse;
 import com.rhsystem.domain.model.Employee;
 import com.rhsystem.domain.model.EmployeeStatus;
-import com.rhsystem.domain.repository.CompanyRepository;
+import com.rhsystem.domain.model.WorkSchedule;
 import com.rhsystem.domain.repository.EmployeeRepository;
 import com.rhsystem.domain.repository.UserCompanyRepository;
+import com.rhsystem.domain.repository.WorkScheduleRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,15 +19,15 @@ import java.util.stream.Collectors;
 public class EmployeeUseCase {
 
     private final EmployeeRepository employeeRepository;
-    private final CompanyRepository companyRepository;
     private final UserCompanyRepository userCompanyRepository;
+    private final WorkScheduleRepository workScheduleRepository;
 
     public EmployeeUseCase(EmployeeRepository employeeRepository,
-                          CompanyRepository companyRepository,
-                          UserCompanyRepository userCompanyRepository) {
+                          UserCompanyRepository userCompanyRepository,
+                          WorkScheduleRepository workScheduleRepository) {
         this.employeeRepository = employeeRepository;
-        this.companyRepository = companyRepository;
         this.userCompanyRepository = userCompanyRepository;
+        this.workScheduleRepository = workScheduleRepository;
     }
 
     @Transactional
@@ -36,6 +37,7 @@ public class EmployeeUseCase {
         if (employeeRepository.existsByCpfAndCompanyId(request.getCpf(), companyId)) {
             throw new RuntimeException("CPF já cadastrado para esta empresa");
         }
+        validateWorkScheduleForCompany(request.getWorkScheduleId(), companyId);
 
         Employee employee = new Employee();
         employee.setId(UUID.randomUUID());
@@ -85,6 +87,7 @@ public class EmployeeUseCase {
             employeeRepository.existsByCpfAndCompanyId(request.getCpf(), companyId)) {
             throw new RuntimeException("CPF já cadastrado para esta empresa");
         }
+        validateWorkScheduleForCompany(request.getWorkScheduleId(), companyId);
 
         employee.setName(request.getName());
         employee.setCpf(request.getCpf());
@@ -113,6 +116,15 @@ public class EmployeeUseCase {
     private void verifyUserAccess(UUID userId, UUID companyId) {
         userCompanyRepository.findByUserIdAndCompanyId(userId, companyId)
                 .orElseThrow(() -> new RuntimeException("Usuário não tem acesso a esta empresa"));
+    }
+
+    private void validateWorkScheduleForCompany(UUID workScheduleId, UUID companyId) {
+        if (workScheduleId == null) return;
+        WorkSchedule schedule = workScheduleRepository.findById(workScheduleId)
+                .orElseThrow(() -> new RuntimeException("Escala de trabalho não encontrada"));
+        if (!schedule.getCompanyId().equals(companyId)) {
+            throw new RuntimeException("Escala de trabalho não pertence a esta empresa");
+        }
     }
 
     private EmployeeResponse toResponse(Employee employee) {

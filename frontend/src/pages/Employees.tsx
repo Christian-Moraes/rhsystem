@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { employeeService, Employee, EmployeeRequest } from '../services/employeeService'
-import { companyService } from '../services/companyService'
+import {
+  workScheduleService,
+  WorkSchedule,
+  WorkScheduleCreateRequest,
+} from '../services/workScheduleService'
 import { useToast } from '../contexts/ToastContext'
 import Card from '../components/ui/Card'
 import Table from '../components/ui/Table'
@@ -12,6 +16,21 @@ import Input from '../components/ui/Input'
 import Badge from '../components/ui/Badge'
 import CompanySelect from '../components/ui/CompanySelect'
 import { PlusIcon, EditIcon, TrashIcon, DocumentIcon, UsersIcon, BuildingIcon } from '../components/icons'
+
+function formatWorkScheduleLabel(s: WorkSchedule): string {
+  return `${s.entryTime} – ${s.exitTime} (${s.dailyHours}h/dia)`
+}
+
+function defaultNewScheduleForm(): WorkScheduleCreateRequest {
+  return {
+    dailyHours: 8,
+    entryTime: '09:00',
+    exitTime: '18:00',
+    breakMinutes: 60,
+    toleranceLate: 15,
+    toleranceLeave: 15,
+  }
+}
 
 export default function Employees() {
   const { showToast } = useToast()
@@ -26,15 +45,20 @@ export default function Employees() {
     hireDate: '',
     workScheduleId: '',
   })
-
-  const { data: companies = [] } = useQuery({
-    queryKey: ['companies'],
-    queryFn: () => companyService.getAll(),
-  })
+  const [showNewSchedule, setShowNewSchedule] = useState(false)
+  const [newScheduleForm, setNewScheduleForm] = useState<WorkScheduleCreateRequest>(() =>
+    defaultNewScheduleForm()
+  )
 
   const { data: employees = [], isLoading } = useQuery({
     queryKey: ['employees', selectedCompanyId],
     queryFn: () => employeeService.getAll(selectedCompanyId),
+    enabled: !!selectedCompanyId,
+  })
+
+  const { data: workSchedules = [] } = useQuery({
+    queryKey: ['work-schedules', selectedCompanyId],
+    queryFn: () => workScheduleService.getAll(selectedCompanyId),
     enabled: !!selectedCompanyId,
   })
 
@@ -78,8 +102,25 @@ export default function Employees() {
     },
   })
 
+  const createScheduleMutation = useMutation({
+    mutationFn: (data: WorkScheduleCreateRequest) =>
+      workScheduleService.create(selectedCompanyId, data),
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ['work-schedules', selectedCompanyId] })
+      setFormData((prev) => ({ ...prev, workScheduleId: created.id }))
+      setShowNewSchedule(false)
+      setNewScheduleForm(defaultNewScheduleForm())
+      showToast('Escala criada e aplicada ao funcionário', 'success')
+    },
+    onError: (error: any) => {
+      showToast(error.response?.data?.message || 'Erro ao criar escala', 'error')
+    },
+  })
+
   const resetForm = () => {
     setFormData({ name: '', cpf: '', role: '', hireDate: '', workScheduleId: '' })
+    setShowNewSchedule(false)
+    setNewScheduleForm(defaultNewScheduleForm())
   }
 
   const handleEdit = (employee: Employee) => {
@@ -100,11 +141,33 @@ export default function Employees() {
       showToast('Selecione uma empresa', 'error')
       return
     }
-    if (editingEmployee) {
-      updateMutation.mutate({ id: editingEmployee.id, data: formData })
-    } else {
-      createMutation.mutate(formData)
+    const wid = formData.workScheduleId?.trim()
+    const payload: EmployeeRequest = {
+      name: formData.name,
+      cpf: formData.cpf,
+      role: formData.role,
+      hireDate: formData.hireDate,
+      workScheduleId: wid ? wid : null,
     }
+    if (editingEmployee) {
+      updateMutation.mutate({ id: editingEmployee.id, data: payload })
+    } else {
+      createMutation.mutate(payload)
+    }
+  }
+
+  const handleCreateSchedule = () => {
+    if (!selectedCompanyId) {
+      showToast('Selecione uma empresa', 'error')
+      return
+    }
+    createScheduleMutation.mutate({ ...newScheduleForm })
+  }
+
+  const scheduleLabelForRow = (workScheduleId?: string) => {
+    if (!workScheduleId) return 'Padrão da empresa'
+    const s = workSchedules.find((w) => w.id === workScheduleId)
+    return s ? formatWorkScheduleLabel(s) : workScheduleId.slice(0, 8) + '…'
   }
 
   return (
@@ -162,7 +225,7 @@ export default function Employees() {
               </div>
             ) : (
               <Table
-                headers={['Nome', 'CPF', 'Cargo', 'Status', 'Ações']}
+                headers={['Nome', 'CPF', 'Cargo', 'Escala', 'Status', 'Ações']}
                 emptyMessage="Nenhum funcionário encontrado"
               >
                 {employees.map((employee) => (
@@ -181,6 +244,9 @@ export default function Employees() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{employee.cpf}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{employee.role || '-'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 max-w-[200px] truncate" title={scheduleLabelForRow(employee.workScheduleId)}>
+                      {scheduleLabelForRow(employee.workScheduleId)}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <Badge variant={employee.status === 'ACTIVE' ? 'success' : 'default'}>
                         {employee.status === 'ACTIVE' ? 'Ativo' : 'Inativo'}
@@ -242,7 +308,7 @@ export default function Employees() {
         }}
         title={editingEmployee ? 'Editar Funcionário' : 'Novo Funcionário'}
         description={editingEmployee ? 'Atualize as informações do funcionário' : 'Preencha os dados para cadastrar um novo funcionário'}
-        size="md"
+        size="lg"
         footer={
           <div className="flex justify-end space-x-3">
             <Button
@@ -302,6 +368,127 @@ export default function Employees() {
             onChange={(e) => setFormData({ ...formData, hireDate: e.target.value })}
             required
           />
+
+          {selectedCompanyId && (
+            <>
+              <div className="w-full">
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  Escala de trabalho
+                </label>
+                <select
+                  className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+                  value={typeof formData.workScheduleId === 'string' ? formData.workScheduleId : ''}
+                  onChange={(e) =>
+                    setFormData({ ...formData, workScheduleId: e.target.value || null })
+                  }
+                >
+                  <option value="">Padrão da empresa (primeira escala cadastrada)</option>
+                  {workSchedules.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {formatWorkScheduleLabel(s)} · atraso ±{s.toleranceLate} min
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs text-gray-500">
+                  Sem escala específica, o sistema usa a regra da empresa para entrada e tolerância.
+                </p>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg p-3 bg-gray-50/80">
+                <button
+                  type="button"
+                  onClick={() => setShowNewSchedule((v) => !v)}
+                  className="text-sm font-medium text-blue-600 hover:text-blue-800"
+                >
+                  {showNewSchedule ? 'Ocultar nova escala' : '+ Criar nova escala nesta empresa'}
+                </button>
+                {showNewSchedule && (
+                  <div className="mt-3 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <Input
+                        label="Horas/dia"
+                        type="number"
+                        min={1}
+                        value={newScheduleForm.dailyHours}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({
+                            ...f,
+                            dailyHours: Number(e.target.value) || 0,
+                          }))
+                        }
+                        required
+                      />
+                      <Input
+                        label="Intervalo (min)"
+                        type="number"
+                        min={0}
+                        value={newScheduleForm.breakMinutes}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({
+                            ...f,
+                            breakMinutes: Number(e.target.value) || 0,
+                          }))
+                        }
+                        required
+                      />
+                      <Input
+                        label="Entrada"
+                        type="time"
+                        value={newScheduleForm.entryTime}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({ ...f, entryTime: e.target.value }))
+                        }
+                        required
+                      />
+                      <Input
+                        label="Saída"
+                        type="time"
+                        value={newScheduleForm.exitTime}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({ ...f, exitTime: e.target.value }))
+                        }
+                        required
+                      />
+                      <Input
+                        label="Tolerância atraso (min)"
+                        type="number"
+                        min={0}
+                        value={newScheduleForm.toleranceLate}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({
+                            ...f,
+                            toleranceLate: Number(e.target.value) || 0,
+                          }))
+                        }
+                        required
+                      />
+                      <Input
+                        label="Tolerância saída (min)"
+                        type="number"
+                        min={0}
+                        value={newScheduleForm.toleranceLeave}
+                        onChange={(e) =>
+                          setNewScheduleForm((f) => ({
+                            ...f,
+                            toleranceLeave: Number(e.target.value) || 0,
+                          }))
+                        }
+                        required
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      isLoading={createScheduleMutation.isPending}
+                      onClick={handleCreateSchedule}
+                    >
+                      Salvar escala e selecionar
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </form>
       </Modal>
     </div>

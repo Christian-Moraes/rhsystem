@@ -6,7 +6,7 @@ import { employeeService } from '../services/employeeService'
 import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
-import { DashboardIcon, BuildingIcon, UsersIcon, DocumentIcon, PlusIcon } from '../components/icons'
+import { BuildingIcon, UsersIcon, DocumentIcon, PlusIcon } from '../components/icons'
 
 export default function Dashboard() {
   const { selectedCompany } = useCompany()

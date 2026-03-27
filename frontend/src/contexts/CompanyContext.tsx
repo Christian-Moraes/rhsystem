@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useAuth } from './AuthContext'
 import { companyService, Company } from '../services/companyService'
 
@@ -14,7 +14,6 @@ const CompanyContext = createContext<CompanyContextType | undefined>(undefined)
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useAuth()
-  const queryClient = useQueryClient()
   const [company, setCompany] = useState<Company | null>(null)
 
   // Busca empresas via API (inclui as cadastradas depois do login)
