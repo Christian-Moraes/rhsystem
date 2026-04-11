@@ -32,6 +32,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.ArrayList;
@@ -320,7 +321,11 @@ public class TimeImportUseCase {
                 + "Inclua a PRIMEIRA e a ÚLTIMA linha da tabela que tiverem dados (ex.: 1ª quinzena até dia 15, 2ª até dia 28/29/30/31). Não pare antes do fim da tabela. Linha totalmente em branco = não inclua.\n"
                 + "(4) HORÁRIOS: Em cada linha, leia os horários NA ORDEM em que aparecem (da esquerda para a direita). "
                 + "Cada dia pode ter 2, 4, 6 ou mais horários conforme o layout (entrada/saída, manhã/tarde, extra, etc.). "
-                + "Formato HH:mm em 24h. Célula vazia = não inclua na lista \"times\".\n\n"
+                + "Formato 24h; prefira dois dígitos na hora (07:00). Célula vazia = não inclua na lista \"times\".\n"
+                + "(5) FOLGAS: Sábado, domingo, feriado ou linha totalmente sem horário: omita o dia no JSON ou use \"times\": []. "
+                + "Nunca invente entradas/saídas para linhas em branco.\n"
+                + "(6) PRECISÃO: Transcreva o horário exatamente como na célula. 16:00 não é 17:00. "
+                + "Muitas folhas encerram a sexta-feira às 16:00 — não \"normalize\" para 17:00 nem arredonde.\n\n"
                 + "Responda APENAS um JSON válido, sem markdown:\n"
                 + "{\"days\":[{\"date\":\"YYYY-MM-DD\",\"times\":[\"HH:mm\",\"HH:mm\",...]},...]}\n"
                 + "Alternativa: pode usar \"day\": N (número 1-31) em vez de \"date\". Não invente datas nem horários. Inclua todos os dias que tiverem pelo menos um horário. Lista completa.";
@@ -484,18 +489,7 @@ public class TimeImportUseCase {
                         int day = -1;
                         String ds = dayNode.path("date").asText(null);
                         if (ds != null && !ds.isBlank()) {
-                            ds = ds.trim();
-                            if (ds.length() >= 10) {
-                                try {
-                                    String part = ds.substring(0, 10);
-                                    if (part.matches("\\d{4}-\\d{2}-\\d{2}")) {
-                                        day = LocalDate.parse(part).getDayOfMonth();
-                                    } else if (part.matches("\\d{2}/\\d{2}/\\d{4}")) {
-                                        String[] d = part.split("/");
-                                        day = Integer.parseInt(d[0]);
-                                    }
-                                } catch (Exception ignored) { }
-                            }
+                            day = parseDayOfMonthFromDateField(ds.trim());
                         }
                         if (day < 1 || day > 31) {
                             JsonNode dayNum = dayNode.path("day");
@@ -503,7 +497,10 @@ public class TimeImportUseCase {
                                 day = dayNum.asInt();
                             }
                         }
-                        if (day < 1) day = 1;
+                        if (day < 1 || day > 31) {
+                            log.warn("[IMPORT_IMAGE] Objeto em days[] sem dia válido (date={}), ignorado", ds);
+                            continue;
+                        }
                         int maxDay = def.lengthOfMonth();
                         if (day > maxDay) day = maxDay;
                         parsedDays.add(day);
@@ -532,23 +529,15 @@ public class TimeImportUseCase {
                         if (lt != null) out.add(LocalDateTime.of(def, lt));
                     } else if (el.isObject()) {
                         String ds = el.path("date").asText(null);
-                        int day = -1;
-                        if (ds != null && ds.length() >= 10) {
-                            try {
-                                String part = ds.substring(0, 10);
-                                if (part.matches("\\d{4}-\\d{2}-\\d{2}")) {
-                                    day = LocalDate.parse(part).getDayOfMonth();
-                                } else if (part.matches("\\d{2}/\\d{2}/\\d{4}")) {
-                                    String[] d = part.split("/");
-                                    day = Integer.parseInt(d[0]);
-                                }
-                            } catch (Exception ignored) { }
-                        }
+                        int day = ds != null && !ds.isBlank() ? parseDayOfMonthFromDateField(ds.trim()) : -1;
                         if (day < 1 || day > 31) {
                             JsonNode dayNum = el.path("day");
                             if (!dayNum.isMissingNode() && dayNum.isNumber()) day = dayNum.asInt();
                         }
-                        if (day < 1) day = def.getDayOfMonth();
+                        if (day < 1 || day > 31) {
+                            log.warn("[IMPORT_IMAGE] Objeto em array sem dia válido (date={}), ignorado", ds);
+                            continue;
+                        }
                         int maxDay = def.lengthOfMonth();
                         if (day > maxDay) day = maxDay;
                         LocalDate normalized = LocalDate.of(def.getYear(), def.getMonthValue(), day);
@@ -627,11 +616,80 @@ public class TimeImportUseCase {
         return out;
     }
 
+    /**
+     * Extrai o dia do mês (1–31) de strings comuns na folha/IA: 2021-12-03, 03/12/2021, 3-Dec, 5-Dez-2021, etc.
+     */
+    private static int parseDayOfMonthFromDateField(String ds) {
+        if (ds == null || ds.isBlank()) {
+            return -1;
+        }
+        ds = ds.trim();
+        try {
+            if (ds.length() >= 10) {
+                String part = ds.substring(0, 10);
+                if (part.matches("\\d{4}-\\d{2}-\\d{2}")) {
+                    return LocalDate.parse(part).getDayOfMonth();
+                }
+                if (part.matches("\\d{2}/\\d{2}/\\d{4}")) {
+                    String[] p = part.split("/");
+                    return Integer.parseInt(p[0]);
+                }
+            }
+            Matcher decSep = Pattern.compile("^(\\d{1,2})[-/]([A-Za-zÀ-ÿ]{3})(?:[-/]\\d{2,4})?").matcher(ds);
+            if (decSep.find()) {
+                int d = Integer.parseInt(decSep.group(1));
+                if (d >= 1 && d <= 31) {
+                    return d;
+                }
+            }
+            for (String fmt : new String[]{"d/M/yyyy", "dd/M/yyyy", "d/MM/yyyy", "d-M-yyyy", "d-MMM-yyyy", "d-MMM-yy"}) {
+                try {
+                    DateTimeFormatter f = DateTimeFormatter.ofPattern(fmt, Locale.forLanguageTag("pt-BR"));
+                    return LocalDate.parse(ds, f).getDayOfMonth();
+                } catch (Exception ignored) {
+                    // try next
+                }
+            }
+            for (String fmt : new String[]{"d-MMM-yyyy", "d-MMM-yy", "MMM d, yyyy"}) {
+                try {
+                    DateTimeFormatter f = DateTimeFormatter.ofPattern(fmt, Locale.ENGLISH);
+                    return LocalDate.parse(ds, f).getDayOfMonth();
+                } catch (Exception ignored) {
+                    // try next
+                }
+            }
+        } catch (Exception ignored) {
+            return -1;
+        }
+        return -1;
+    }
+
     private static LocalTime parseTimeOnly(String s) {
         if (s == null || s.isBlank()) return null;
         s = s.trim();
+        // Remove sufixos comuns ("7:00h", "07:00 ")
+        if (s.endsWith("h") || s.endsWith("H")) {
+            s = s.substring(0, s.length() - 1).trim();
+        }
+        // HH:mm:ss ou H:mm:ss
+        int thirdColon = s.indexOf(':', s.indexOf(':') + 1);
+        if (thirdColon > 0) {
+            s = s.substring(0, thirdColon);
+        }
         try {
-            if (s.length() >= 5) return LocalTime.parse(s.substring(0, 5), DateTimeFormatter.ofPattern("HH:mm"));
+            String[] parts = s.split(":");
+            if (parts.length >= 2) {
+                int h = Integer.parseInt(parts[0].trim());
+                int min = Integer.parseInt(parts[1].trim().replaceAll("\\D.*", ""));
+                if (h >= 0 && h <= 23 && min >= 0 && min <= 59) {
+                    return LocalTime.of(h, min);
+                }
+            }
+        } catch (Exception ignored) { }
+        try {
+            if (s.length() >= 5) {
+                return LocalTime.parse(s.substring(0, 5), DateTimeFormatter.ofPattern("HH:mm"));
+            }
         } catch (Exception ignored) { }
         return null;
     }

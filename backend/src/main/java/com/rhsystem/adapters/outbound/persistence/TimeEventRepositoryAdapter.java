@@ -52,7 +52,9 @@ public class TimeEventRepositoryAdapter implements TimeEventRepository {
 
     @Override
     public List<TimeEvent> findByEmployeeIdAndMonth(UUID employeeId, int month, int year) {
-        return jpaTimeEventRepository.findByEmployeeIdAndMonth(employeeId, month, year)
+        LocalDateTime start = LocalDateTime.of(year, month, 1, 0, 0);
+        LocalDateTime end = start.plusMonths(1);
+        return jpaTimeEventRepository.findByEmployeeIdAndDateRange(employeeId, start, end)
                 .stream()
                 .map(TimeEventEntity::toDomain)
                 .collect(Collectors.toList());

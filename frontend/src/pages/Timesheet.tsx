@@ -9,14 +9,29 @@ import { useCompany } from '../contexts/CompanyContext'
 import { useToast } from '../contexts/ToastContext'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
+import Modal from '../components/ui/Modal'
 import Badge from '../components/ui/Badge'
 import CompanySelect from '../components/ui/CompanySelect'
 import EmployeeSelect from '../components/ui/EmployeeSelect'
-import { ClockIcon, UploadIcon, CheckCircleIcon } from '../components/icons'
+import { ClockIcon, UploadIcon, CheckCircleIcon, DocumentIcon, TrashIcon } from '../components/icons'
+import { PunchTimeInput } from '../components/timesheet/PunchTimeInput'
 
 interface DayEntry {
   dateStr: string
   punches: Array<{ type: 'ENTRY' | 'EXIT'; time: string }>
+}
+
+/** Ordenação cronológica; `localeCompare` falha com "7:00" vs "12:00". */
+function comparePunchTime(a: string, b: string): number {
+  if (!a && !b) return 0
+  if (!a) return 1
+  if (!b) return -1
+  const toMin = (t: string) => {
+    const m = t.trim().match(/^(\d{1,2}):(\d{2})$/)
+    if (!m) return Number.MAX_SAFE_INTEGER
+    return Number(m[1]) * 60 + Number(m[2])
+  }
+  return toMin(a) - toMin(b)
 }
 
 export default function TimesheetPage() {
@@ -32,6 +47,8 @@ export default function TimesheetPage() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [importFiles, setImportFiles] = useState<File[]>([])
   const [importDragActive, setImportDragActive] = useState(false)
+  const [exporting, setExporting] = useState<'xls' | 'csv' | null>(null)
+  const [clearDayTarget, setClearDayTarget] = useState<null | { dateStr: string; dayLabel: string }>(null)
 
   const { data: employees = [], isLoading: isEmployeesLoading } = useQuery({
     queryKey: ['employees', selectedCompany?.id],
@@ -99,7 +116,7 @@ export default function TimesheetPage() {
         const date = new Date(year, month - 1, day)
         if (date.getMonth() + 1 !== month || date.getFullYear() !== year) continue
 
-        const dayEvents = (byDay[dateStr] || []).sort((a, b) => a.time.localeCompare(b.time))
+        const dayEvents = (byDay[dateStr] || []).sort((a, b) => comparePunchTime(a.time, b.time))
         // IMPORTANT: o backend pode ter `event_type` invertido por histórico/importação.
         // Para a grade continuar consistente com a UI (E1/S1/E2/S2), determinamos ENTRY/EXIT
         // pela posição (ordem na tela), e não pelo event_type recebido do banco.
@@ -227,6 +244,31 @@ export default function TimesheetPage() {
     setHasUnsavedChanges(true)
   }
 
+  const emptyDayTemplate = (): DayEntry['punches'] => [
+    { type: 'ENTRY', time: '' },
+    { type: 'EXIT', time: '' },
+    { type: 'ENTRY', time: '' },
+    { type: 'EXIT', time: '' },
+  ]
+
+  /** Abre o modal de confirmação antes de limpar o dia. */
+  const requestClearDay = (dateStr: string, dayLabel: string) => {
+    setClearDayTarget({ dateStr, dayLabel })
+  }
+
+  /** Zera o dia na grade (4 batidas vazias). Persiste só após Salvar. */
+  const confirmClearDay = () => {
+    if (!clearDayTarget) return
+    const { dateStr } = clearDayTarget
+    setGradeData((prev) => ({
+      ...prev,
+      [dateStr]: { dateStr, punches: emptyDayTemplate() },
+    }))
+    setHasUnsavedChanges(true)
+    setClearDayTarget(null)
+    showToast('Dia limpo na grade. Salve para gravar no servidor.', 'success')
+  }
+
   const saveGradeMutation = useMutation({
     mutationFn: async () => {
       if (!selectedCompany?.id || !selectedEmployeeId) return
@@ -251,9 +293,9 @@ export default function TimesheetPage() {
         for (let idx = 0; idx < entry.punches.length; idx++) {
           const punch = entry.punches[idx]
           if (!punch.time) continue
-          // `type="time"` pode retornar valores inesperados; só cria evento se estiver no formato HH:mm.
-          if (!/^\d{2}:\d{2}$/.test(punch.time)) continue
-          const [h, min] = punch.time.split(':').map(Number)
+          // Aceita H:mm ou HH:mm (normaliza para o backend).
+          if (!/^\d{1,2}:\d{2}$/.test(punch.time.trim())) continue
+          const [h, min] = punch.time.trim().split(':').map(Number)
           const hStr = String(h).padStart(2, '0')
           const minStr = String(min).padStart(2, '0')
           // Envia sem timezone ("Z") para o backend tratar como LocalDateTime no mesmo relógio local.
@@ -391,6 +433,30 @@ export default function TimesheetPage() {
   const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId)
   const hasContext = !!selectedCompany && !!selectedEmployeeId
 
+  const runClosureExport = async (format: 'xls' | 'csv') => {
+    if (!selectedCompany?.id || !selectedEmployeeId) return
+    setExporting(format)
+    try {
+      await timesheetService.downloadClosureExport(
+        selectedCompany.id,
+        selectedEmployeeId,
+        month,
+        year,
+        format
+      )
+      showToast('Arquivo gerado no servidor (batidas, totais e regras).', 'success')
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+            'Não foi possível gerar a exportação.'
+      showToast(msg, 'error')
+    } finally {
+      setExporting(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -452,12 +518,40 @@ export default function TimesheetPage() {
         <>
           {/* Título do fechamento */}
           <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4 md:p-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
                 <h2 className="text-lg font-bold text-gray-900">Fechando ponto de {selectedEmployee?.name || 'Funcionário'}</h2>
                 <p className="text-sm text-gray-600 mt-0.5">
                   {selectedCompany?.name} · {monthName}/{year}
                 </p>
+              </div>
+              <div className="flex flex-col items-stretch sm:items-end gap-2 w-full sm:w-auto shrink-0">
+                <p className="text-xs text-gray-600 text-left sm:text-right max-w-[18rem] leading-snug">
+                  Excel (.xls) ou CSV gerados no servidor: batidas E/S, totais e regras do cálculo (escala, extras, cadastro da empresa).
+                </p>
+                <div className="flex flex-wrap gap-2 justify-start sm:justify-end">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!exporting}
+                    isLoading={exporting === 'xls'}
+                    icon={<DocumentIcon className="w-4 h-4" />}
+                    onClick={() => runClosureExport('xls')}
+                  >
+                    Excel
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!exporting}
+                    isLoading={exporting === 'csv'}
+                    onClick={() => runClosureExport('csv')}
+                  >
+                    CSV
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
@@ -488,16 +582,21 @@ export default function TimesheetPage() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
-              <div className="flex items-end">
+              <div className="flex flex-col justify-end gap-1">
                 <Button
                   onClick={() => closeMutation.mutate()}
-                  disabled={closeMutation.isPending || hasUnsavedChanges}
+                  disabled={closeMutation.isPending}
                   isLoading={closeMutation.isPending}
                   className="w-full"
                   icon={<CheckCircleIcon className="w-4 h-4" />}
                 >
                   Fechar Mês
                 </Button>
+                {hasUnsavedChanges && (
+                  <p className="text-[11px] leading-snug text-amber-800">
+                    Grade com edições locais: o fechamento usa batidas <strong>já salvas</strong> no servidor. Salve a grade antes se quiser incluir essas mudanças.
+                  </p>
+                )}
               </div>
             </div>
           </Card>
@@ -686,7 +785,7 @@ export default function TimesheetPage() {
           {/* Grade de Ponto */}
           <Card
             title={`Grade de Ponto — ${selectedEmployee?.name || 'Funcionário'} | ${monthName}/${year}`}
-            description="Edite diretamente na grade. Mínimo 4 campos (E1/S1/E2/S2), pode adicionar mais batidas."
+            description="Enter: próximo campo · Shift+Enter: anterior · ↑↓: ±5 min (Shift: ±15 min)."
             actions={
               hasUnsavedChanges ? (
                 <Button
@@ -701,79 +800,149 @@ export default function TimesheetPage() {
                 </Button>
               ) : null
             }
+            className="border-slate-200/90 shadow-sm"
           >
-            <div className="max-h-[500px] overflow-y-auto rounded-lg border border-gray-200">
-              <table className="w-full border-collapse text-sm">
-                <thead className="sticky top-0 bg-gray-50 z-10">
-                  <tr className="border-b">
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700 w-28">Dia</th>
-                    <th className="px-4 py-3 text-left font-semibold text-gray-700">
-                      Batidas (só o dia clicado expande)
-                    </th>
-                    <th className="px-3 py-3 text-center font-semibold text-gray-700 text-xs w-24">Ações</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {gradeRows.map((row) => {
-                    const dateStr = row.key
-                    const punches = [...row.punches]
-                    const minLen = 4
-                    while (punches.length < minLen) {
-                      const idx = punches.length
-                      punches.push({
-                        type: idx % 2 === 0 ? 'ENTRY' : 'EXIT',
-                        time: '',
-                      })
-                    }
-                    return (
-                      <tr key={dateStr} className="border-b border-gray-100 hover:bg-blue-50/30 transition-colors align-top">
-                        <td className="whitespace-nowrap px-4 py-2.5 text-gray-800 font-medium">{row.label}</td>
-                        <td className="px-2 py-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            {punches.map((punch, idx) => {
-                              const pair = Math.floor(idx / 2) + 1
-                              const label = idx % 2 === 0 ? `E${pair}` : `S${pair}`
-                              return (
-                                <div key={idx} className="flex items-center gap-1">
-                                  <span className="text-[10px] text-gray-500 w-6 shrink-0">{label}</span>
-                                  <input
-                                    type="time"
-                                    value={punch.time}
-                                    onChange={(e) => updateGradeCell(dateStr, idx, e.target.value)}
-                                    className="w-[6.5rem] rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
-                                  />
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </td>
-                        <td className="px-2 py-2">
-                          <div className="flex gap-1 justify-center">
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); addPunchPair(dateStr) }}
-                              className="rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 transition-colors"
-                              title="Adicionar mais batidas neste dia"
-                            >
-                              +
-                            </button>
-                            {row.punches.length > 4 && (
+            <div
+              className="-mx-6 -mb-6 -mt-1 border-t border-slate-100 bg-gradient-to-b from-slate-50/80 to-white"
+              data-timesheet-grade
+            >
+              <div className="max-h-[min(70vh,560px)] overflow-y-auto overscroll-contain">
+                <table className="w-full border-collapse text-[13px]">
+                  <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-100/95 backdrop-blur-sm">
+                    <tr>
+                      <th className="w-[4.5rem] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                        Dia
+                      </th>
+                      <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                        Turnos (E = entrada · S = saída)
+                      </th>
+                      <th className="w-24 px-2 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                        Ações
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {gradeRows.map((row, rowIndex) => {
+                      const dateStr = row.key
+                      const labelBits = row.label.split(' ')
+                      const datePart = labelBits[0] ?? row.label
+                      const weekPart = labelBits.slice(1).join(' ')
+                      const punches = [...row.punches]
+                      const minLen = 4
+                      while (punches.length < minLen) {
+                        const idx = punches.length
+                        punches.push({
+                          type: idx % 2 === 0 ? 'ENTRY' : 'EXIT',
+                          time: '',
+                        })
+                      }
+                      const hasAnyTime = row.punches.some((p) => p.time)
+                      const zebra = rowIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'
+                      return (
+                        <tr
+                          key={dateStr}
+                          className={`${zebra} transition-colors hover:bg-indigo-50/40 align-middle`}
+                        >
+                          <td className="whitespace-nowrap px-3 py-2 align-middle">
+                            <div className="flex flex-col leading-tight">
+                              <span className="font-semibold tabular-nums text-slate-900">{datePart}</span>
+                              {weekPart ? (
+                                <span className="text-[11px] font-medium text-slate-500">{weekPart}</span>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                              {Array.from({ length: Math.ceil(punches.length / 2) }, (_, pairIdx) => {
+                                const idx = pairIdx * 2
+                                const ePunch = punches[idx]
+                                const sPunch = punches[idx + 1]
+                                const pairNum = pairIdx + 1
+                                return (
+                                  <div
+                                    key={pairIdx}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200/90 bg-white px-1.5 py-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+                                  >
+                                    <span className="w-4 shrink-0 text-center text-[10px] font-bold text-indigo-600">
+                                      E{pairNum}
+                                    </span>
+                                    <PunchTimeInput
+                                      compact
+                                      id={`punch-${dateStr}-e${pairNum}`}
+                                      aria-label={`${row.label} entrada ${pairNum}`}
+                                      value={ePunch?.time ?? ''}
+                                      onChange={(v) => updateGradeCell(dateStr, idx, v)}
+                                    />
+                                    <span
+                                      className="select-none text-slate-300"
+                                      aria-hidden
+                                    >
+                                      ·
+                                    </span>
+                                    <span className="w-4 shrink-0 text-center text-[10px] font-bold text-amber-600">
+                                      S{pairNum}
+                                    </span>
+                                    <PunchTimeInput
+                                      compact
+                                      id={`punch-${dateStr}-s${pairNum}`}
+                                      aria-label={`${row.label} saída ${pairNum}`}
+                                      value={sPunch?.time ?? ''}
+                                      onChange={(v) => updateGradeCell(dateStr, idx + 1, v)}
+                                    />
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="flex items-center justify-end gap-0.5">
                               <button
                                 type="button"
-                                onClick={(e) => { e.stopPropagation(); removePunchPair(dateStr) }}
-                                className="rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 transition-colors"
-                                title="Remover último par neste dia"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  addPunchPair(dateStr)
+                                }}
+                                className="flex h-8 w-8 items-center justify-center rounded-md text-base font-medium text-indigo-600 transition-colors hover:bg-indigo-100 hover:text-indigo-800"
+                                title="Adicionar turno neste dia"
+                                aria-label="Adicionar turno"
                               >
-                                −
+                                +
                               </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                              {row.punches.length > 4 && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    removePunchPair(dateStr)
+                                  }}
+                                  className="flex h-8 w-8 items-center justify-center rounded-md text-base font-medium text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-800"
+                                  title="Remover último turno"
+                                  aria-label="Remover último turno"
+                                >
+                                  −
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={!hasAnyTime}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  requestClearDay(dateStr, row.label)
+                                }}
+                                className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:pointer-events-none disabled:opacity-30"
+                                title="Limpar todos os horários deste dia"
+                                aria-label="Limpar dia"
+                              >
+                                <TrashIcon className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </Card>
 
@@ -782,6 +951,33 @@ export default function TimesheetPage() {
             <Card
               title="Resumo do Fechamento"
               description={`Fechamento consolidado para ${selectedEmployee?.name || 'funcionário'} em ${monthName}/${year}`}
+              actions={
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!!exporting}
+                    isLoading={exporting === 'xls'}
+                    icon={<DocumentIcon className="w-4 h-4" />}
+                    onClick={() => runClosureExport('xls')}
+                    title="Arquivo .xls gerado no backend (batidas, totais, regras)"
+                  >
+                    Exportar Excel
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!!exporting}
+                    isLoading={exporting === 'csv'}
+                    onClick={() => runClosureExport('csv')}
+                    title="CSV com separador ; (UTF-8)"
+                  >
+                    CSV
+                  </Button>
+                </div>
+              }
             >
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-5 border border-blue-200">
@@ -822,12 +1018,15 @@ export default function TimesheetPage() {
                     variant="outline"
                     size="sm"
                     onClick={() => closeMutation.mutate()}
-                    disabled={closeMutation.isPending || hasUnsavedChanges}
+                    disabled={closeMutation.isPending}
                     isLoading={closeMutation.isPending}
                   >
                     Recalcular resumo
                   </Button>
-                  <span className="text-xs text-gray-500">Atualiza horas, atrasos e ausências com a escala atual.</span>
+                  <span className="text-xs text-gray-500">
+                    Atualiza horas, atrasos e ausências com a escala atual
+                    {hasUnsavedChanges ? ' (dados já salvos no servidor; salve a grade se editou algo).' : '.'}
+                  </span>
                 </div>
               )}
             </Card>
@@ -845,6 +1044,52 @@ export default function TimesheetPage() {
           )}
         </>
       )}
+
+      <Modal
+        isOpen={!!clearDayTarget}
+        onClose={() => setClearDayTarget(null)}
+        title="Limpar horários deste dia?"
+        description={
+          clearDayTarget
+            ? `As batidas de ${clearDayTarget.dayLabel} serão apagadas só na grade local.`
+            : undefined
+        }
+        size="sm"
+        footer={
+          <>
+            <Button type="button" variant="outline" size="sm" onClick={() => setClearDayTarget(null)}>
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              size="sm"
+              icon={<TrashIcon className="h-4 w-4" />}
+              onClick={confirmClearDay}
+            >
+              Limpar dia
+            </Button>
+          </>
+        }
+      >
+        <div className="flex gap-4 rounded-xl border border-amber-200/80 bg-gradient-to-br from-amber-50 to-orange-50/60 p-4">
+          <div
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 shadow-inner"
+            aria-hidden
+          >
+            <TrashIcon className="h-6 w-6" />
+          </div>
+          <div className="min-w-0 space-y-2 text-sm text-slate-700">
+            <p className="font-medium text-slate-900">Esta ação remove todos os horários preenchidos nesta linha.</p>
+            <ul className="list-disc space-y-1 pl-4 text-slate-600">
+              <li>Os campos voltam ao estado vazio (quatro batidas em branco).</li>
+              <li>
+                Nada é enviado ao servidor até você clicar em <span className="font-medium text-slate-800">Salvar Grade</span>.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

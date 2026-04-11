@@ -1,0 +1,28 @@
+---
+description: Compilar e validar o backend Java sempre via Docker (JDK 21 alinhado ao projeto).
+globs: backend/**/*.java
+alwaysApply: false
+---
+
+# Backend — build no Docker
+
+- **Não confiar em `mvn` no host** se a JDK não for 21; o projeto usa Java 21 como no `Dockerfile` do backend.
+- Após alterar código em `backend/**/*.java`, na **raiz do repositório** (`rhsystem/`), execute:
+
+```bash
+docker-compose build backend
+```
+
+- Para rodar **testes unitários** sem subir o serviço Spring (o container `backend` só executa o JAR), use a imagem Maven com volume:
+
+```bash
+docker run --rm -v "$(pwd)/backend:/app" -w /app maven:3.9-eclipse-temurin-21 mvn -q test
+```
+
+- Para aplicar a nova imagem em execução:
+
+```bash
+docker-compose build backend && docker rm -f rhsystem-backend 2>/dev/null; docker-compose up -d backend
+```
+
+  O `docker-compose` às vezes **não recria** o container se o nome já existir; sem remover o antigo, o processo pode continuar com o **JAR antigo** (sintoma: cálculo de ponto errado após “corrigir” o código).

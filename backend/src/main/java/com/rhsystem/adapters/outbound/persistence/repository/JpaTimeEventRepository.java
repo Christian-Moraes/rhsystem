@@ -8,13 +8,15 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 @Repository
 public interface JpaTimeEventRepository extends JpaRepository<TimeEventEntity, UUID> {
     List<TimeEventEntity> findByEmployeeIdOrderByEventTimeAsc(UUID employeeId);
     
+    /**
+     * Intervalo [startDate, endDate) — usado também para filtro mensal (evita EXTRACT/Hibernate).
+     */
     @Query("SELECT te FROM TimeEventEntity te WHERE te.employeeId = :employeeId " +
            "AND te.eventTime >= :startDate AND te.eventTime < :endDate " +
            "ORDER BY te.eventTime ASC")
@@ -22,15 +24,5 @@ public interface JpaTimeEventRepository extends JpaRepository<TimeEventEntity, U
         @Param("employeeId") UUID employeeId,
         @Param("startDate") LocalDateTime startDate,
         @Param("endDate") LocalDateTime endDate
-    );
-    
-    @Query("SELECT te FROM TimeEventEntity te WHERE te.employeeId = :employeeId " +
-           "AND EXTRACT(MONTH FROM te.eventTime) = :month " +
-           "AND EXTRACT(YEAR FROM te.eventTime) = :year " +
-           "ORDER BY te.eventTime ASC")
-    List<TimeEventEntity> findByEmployeeIdAndMonth(
-        @Param("employeeId") UUID employeeId,
-        @Param("month") int month,
-        @Param("year") int year
     );
 }
