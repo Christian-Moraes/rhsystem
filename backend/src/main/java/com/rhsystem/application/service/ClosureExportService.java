@@ -4,11 +4,10 @@ import com.rhsystem.application.dto.ClosureBreakdownResponse;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Month;
-import java.time.format.TextStyle;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
 
 /**
  * Gera CSV e planilha Excel (SpreadsheetML .xls) no servidor — mesmo conteúdo esperado do fechamento.
@@ -37,12 +36,35 @@ public class ClosureExportService {
         return "<Cell><Data ss:Type=\"String\">" + xmlEscape(value != null ? value : "") + "</Data></Cell>";
     }
 
-    private static String cellNumber(int value) {
-        return "<Cell><Data ss:Type=\"Number\">" + value + "</Data></Cell>";
+    private static String cellFormulaWithStyle(String formula, String styleId) {
+        return "<Cell ss:StyleID=\"" + attrEscape(styleId) + "\" ss:Formula=\"" + attrEscape(formula)
+                + "\"><Data ss:Type=\"Number\">0</Data></Cell>";
     }
 
-    private static String cellFormula(String formula) {
-        return "<Cell ss:Formula=\"" + attrEscape(formula) + "\"><Data ss:Type=\"Number\">0</Data></Cell>";
+    private static String cellDate(String isoDate) {
+        if (isoDate == null || isoDate.isBlank()) {
+            return cellString("");
+        }
+        try {
+            LocalDate d = LocalDate.parse(isoDate);
+            return "<Cell ss:StyleID=\"date\"><Data ss:Type=\"DateTime\">"
+                    + d + "T00:00:00.000</Data></Cell>";
+        } catch (Exception ignored) {
+            return cellString(isoDate);
+        }
+    }
+
+    private static String cellTime(String hhmm) {
+        if (hhmm == null || hhmm.isBlank()) {
+            return cellString("");
+        }
+        try {
+            LocalTime t = LocalTime.parse(hhmm);
+            return "<Cell ss:StyleID=\"time\"><Data ss:Type=\"DateTime\">1899-12-30T"
+                    + t + ":00.000</Data></Cell>";
+        } catch (Exception ignored) {
+            return cellString(hhmm);
+        }
     }
 
     private static String rowFromParts(String... parts) {
@@ -52,10 +74,6 @@ public class ClosureExportService {
         }
         sb.append("</Row>");
         return sb.toString();
-    }
-
-    private static String rowEmpty() {
-        return "<Row/>";
     }
 
     private static String worksheet(String name, String tableInner) {
@@ -70,14 +88,42 @@ public class ClosureExportService {
                 + "xmlns:x=\"urn:schemas-microsoft-com:office:excel\" "
                 + "xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\" "
                 + "xmlns:html=\"http://www.w3.org/TR/REC-html40\">\n"
+                + "<Styles>"
+                + "<Style ss:ID=\"date\"><NumberFormat ss:Format=\"yyyy-mm-dd\"/></Style>"
+                + "<Style ss:ID=\"time\"><NumberFormat ss:Format=\"hh:mm\"/></Style>"
+                + "<Style ss:ID=\"duration\"><NumberFormat ss:Format=\"[h]:mm\"/></Style>"
+                + "</Styles>"
                 + sheetsInner
                 + "\n</Workbook>";
     }
 
-    private static String formatMinutesPt(int minutes) {
-        int h = minutes / 60;
-        int m = minutes % 60;
-        return h + "h " + (m < 10 ? "0" : "") + m + "m";
+    private static String excelTimeLiteralFromMinutes(int minutes) {
+        int safe = Math.max(0, minutes);
+        int h = safe / 60;
+        int m = safe % 60;
+        return "TIME(" + h + "," + m + ",0)";
+    }
+
+    private static String[] extractPunchSlots(String punchTimeline) {
+        String[] slots = new String[] { "", "", "", "" };
+        if (punchTimeline == null || punchTimeline.isBlank() || "—".equals(punchTimeline)) {
+            return slots;
+        }
+        String[] parts = punchTimeline.split("\\|");
+        int idx = 0;
+        for (String part : parts) {
+            String token = part.trim();
+            int space = token.lastIndexOf(' ');
+            String time = space >= 0 ? token.substring(space + 1).trim() : token;
+            if (!time.matches("\\d{2}:\\d{2}")) {
+                continue;
+            }
+            if (idx >= slots.length) {
+                break;
+            }
+            slots[idx++] = time;
+        }
+        return slots;
     }
 
     private static String hoursDecimalBr(int minutes) {
@@ -88,124 +134,74 @@ public class ClosureExportService {
         return Boolean.TRUE.equals(b) ? "sim" : "não";
     }
 
-    private static String dash(Object o) {
-        return o == null ? "—" : Objects.toString(o);
-    }
-
     public byte[] toSpreadsheetXml(ClosureBreakdownResponse r) {
-        String monthLabel = Month.of(r.getMonth()).getDisplayName(TextStyle.FULL, new Locale("pt", "BR"));
-        String company = r.getCompanyName() != null ? r.getCompanyName() : "—";
-
-        StringBuilder resumo = new StringBuilder();
-        resumo.append(rowFromParts(cellString("Fechamento de ponto — exportação (servidor)")));
-        resumo.append(rowFromParts(cellString("Empresa"), cellString(company)));
-        resumo.append(rowFromParts(cellString("Funcionário"), cellString(r.getEmployeeName())));
-        resumo.append(rowFromParts(cellString("Período"), cellString(monthLabel + " / " + r.getYear())));
-        resumo.append(rowEmpty());
-        resumo.append(rowFromParts(cellString("Cadastro da empresa")));
-        resumo.append(rowFromParts(cellString("Hora extra habilitada"), cellString(yn(r.getCompanyEnableOvertime()))));
-        resumo.append(rowFromParts(cellString("Banco de horas habilitado"), cellString(yn(r.getCompanyEnableTimeBank()))));
-        if (r.getCompanyOvertimePercentage() != null) {
-            resumo.append(rowFromParts(cellString("% hora extra (cadastro)"), cellString(r.getCompanyOvertimePercentage() + "%")));
+        if (r.getCompanyOvertimePercentage() == null || r.getCompanyWeekendPercentage() == null) {
+            throw new RuntimeException(
+                    "Exportação de planilha exige percentuais de hora extra cadastrados na empresa "
+                            + "(normal e fim de semana).");
         }
-        if (r.getCompanyWeekendPercentage() != null) {
-            resumo.append(rowFromParts(cellString("% fim de semana (cadastro)"), cellString(r.getCompanyWeekendPercentage() + "%")));
-        }
-        resumo.append(rowEmpty());
-        resumo.append(rowFromParts(cellString("Escala aplicada no cálculo")));
-        resumo.append(rowFromParts(cellString("Norma diária (minutos)"), cellNumber(r.getScheduleDailyNormMinutes())));
-        resumo.append(rowFromParts(cellString("Norma diária (h dec)"), cellString(hoursDecimalBr(r.getScheduleDailyNormMinutes()))));
-        resumo.append(rowFromParts(cellString("Entrada esperada"), cellString(dash(r.getScheduleEntryTime()))));
-        resumo.append(rowFromParts(cellString("Saída esperada"), cellString(dash(r.getScheduleExitTime()))));
-        resumo.append(rowFromParts(cellString("Intervalo (min)"), cellString(dash(r.getScheduleBreakMinutes()))));
-        resumo.append(rowFromParts(cellString("Tolerância atraso (min)"), cellString(dash(r.getScheduleToleranceLate()))));
-        resumo.append(rowFromParts(cellString("Tolerância saída (min)"), cellString(dash(r.getScheduleToleranceLeave()))));
-        resumo.append(rowEmpty());
-        resumo.append(rowFromParts(cellString("Resumo — valores calculados agora (motor; Fechar Mês / Recalcular)")));
-        resumo.append(rowFromParts(cellString("Horas trabalhadas (min)"), cellNumber(r.getCalculatedWorkedMinutes())));
-        resumo.append(rowFromParts(cellString("Horas trabalhadas (h dec)"), cellString(hoursDecimalBr(r.getCalculatedWorkedMinutes()))));
-        resumo.append(rowFromParts(cellString("Horas trabalhadas (texto)"), cellString(formatMinutesPt(r.getCalculatedWorkedMinutes()))));
-        resumo.append(rowFromParts(cellString("Horas extras (min)"), cellNumber(r.getCalculatedExtraMinutes())));
-        resumo.append(rowFromParts(cellString("Horas extras (h dec)"), cellString(hoursDecimalBr(r.getCalculatedExtraMinutes()))));
-        resumo.append(rowFromParts(cellString("Horas extras (texto)"), cellString(formatMinutesPt(r.getCalculatedExtraMinutes()))));
-        resumo.append(rowFromParts(cellString("Atrasos (min)"), cellNumber(r.getCalculatedDelayMinutes())));
-        resumo.append(rowFromParts(cellString("Atrasos (texto)"), cellString(formatMinutesPt(r.getCalculatedDelayMinutes()))));
-        resumo.append(rowFromParts(cellString("Ausências (min)"), cellNumber(r.getCalculatedAbsenceMinutes())));
-        resumo.append(rowFromParts(cellString("Ausências (texto)"), cellString(formatMinutesPt(r.getCalculatedAbsenceMinutes()))));
-
-        if (r.getClosedAt() != null) {
-            resumo.append(rowEmpty());
-            resumo.append(rowFromParts(cellString("Último fechamento salvo"), cellString(r.getClosedAt())));
-            resumo.append(rowFromParts(cellString("Armazenado — trabalhadas (min)"), cellString(dash(r.getStoredWorkedMinutes()))));
-            resumo.append(rowFromParts(cellString("Armazenado — extras (min)"), cellString(dash(r.getStoredExtraMinutes()))));
-            resumo.append(rowFromParts(cellString("Armazenado — atrasos (min)"), cellString(dash(r.getStoredDelayMinutes()))));
-            resumo.append(rowFromParts(cellString("Armazenado — ausências (min)"), cellString(dash(r.getStoredAbsenceMinutes()))));
-        }
-
+        int overtimePct = r.getCompanyOvertimePercentage();
+        int weekendPct = r.getCompanyWeekendPercentage();
+        int dailyNormMinutes = Math.max(0, r.getScheduleDailyNormMinutes());
+        int weekendNormMinutes = dailyNormMinutes / 2;
+        int tierOneCapMinutes = 120;
+        String dailyNormExpr = excelTimeLiteralFromMinutes(dailyNormMinutes);
+        String weekendNormExpr = excelTimeLiteralFromMinutes(weekendNormMinutes);
+        String tierOneCapExpr = excelTimeLiteralFromMinutes(tierOneCapMinutes);
+        String dailyTierTwoStartExpr = excelTimeLiteralFromMinutes(dailyNormMinutes + tierOneCapMinutes);
+        String weekendTierTwoStartExpr = excelTimeLiteralFromMinutes(weekendNormMinutes + tierOneCapMinutes);
         List<ClosureBreakdownResponse.DailyLine> lines = r.getDailyLines();
-        int n = lines != null ? lines.size() : 0;
-
-        StringBuilder det = new StringBuilder();
-        det.append(rowFromParts(
+        StringBuilder controle = new StringBuilder();
+        controle.append(rowFromParts(
                 cellString("Data"),
-                cellString("Batidas (E/S)"),
-                cellString("1ª entrada"),
-                cellString("Trabalhado bruto (min)"),
-                cellString("Trabalhado contábil (min)"),
-                cellString("Extras dia (min)"),
-                cellString("Atraso dia (min)"),
-                cellString("Ausência dia (min)"),
-                cellString("Fórmula / regra (linha)")
+                cellString("Entrada Manhã"),
+                cellString("Saída Manhã"),
+                cellString("Entrada Tarde"),
+                cellString("Saída Tarde"),
+                cellString("Horas Trabalhadas"),
+                cellString("Horas Extras " + overtimePct + "%"),
+                cellString("Horas Extras " + weekendPct + "%"),
+                cellString("Horas Faltas")
         ));
+
         if (lines != null) {
             for (ClosureBreakdownResponse.DailyLine d : lines) {
-                det.append(rowFromParts(
-                        cellString(d.getDate()),
-                        cellString(d.getPunchTimeline() != null ? d.getPunchTimeline() : "—"),
-                        cellString(dash(d.getFirstEntryTime())),
-                        cellNumber(d.getWorkedRawMinutes()),
-                        cellNumber(d.getWorkedCountedMinutes()),
-                        cellNumber(d.getExtraMinutes()),
-                        cellNumber(d.getDelayMinutes()),
-                        cellNumber(d.getAbsenceMinutes()),
-                        cellString(d.getCalculationNote() != null ? d.getCalculationNote() : "")
+                String[] slots = extractPunchSlots(d.getPunchTimeline());
+                controle.append(rowFromParts(
+                        cellDate(d.getDate()),
+                        cellTime(slots[0]),
+                        cellTime(slots[1]),
+                        cellTime(slots[2]),
+                        cellTime(slots[3]),
+                        cellFormulaWithStyle("=IF(OR(RC[-4]=\"\",RC[-3]=\"\"),0,RC[-3]-RC[-4])+IF(OR(RC[-2]=\"\",RC[-1]=\"\"),0,RC[-1]-RC[-2])", "duration"),
+                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-6])=7,IF(RC[-1]>" + weekendNormExpr + ",MIN(RC[-1]-" + weekendNormExpr + "," + tierOneCapExpr + "),0),IF(RC[-1]>" + dailyNormExpr + ",MIN(RC[-1]-" + dailyNormExpr + "," + tierOneCapExpr + "),0))", "duration"),
+                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-7])=7,IF(RC[-2]>" + weekendTierTwoStartExpr + ",RC[-2]-" + weekendTierTwoStartExpr + ",0),IF(RC[-2]>" + dailyTierTwoStartExpr + ",RC[-2]-" + dailyTierTwoStartExpr + ",0))", "duration"),
+                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-8])=7,IF(RC[-3]<" + weekendNormExpr + "," + weekendNormExpr + "-RC[-3],0),IF(RC[-3]<" + dailyNormExpr + "," + dailyNormExpr + "-RC[-3],0))", "duration")
                 ));
             }
         }
-        if (n > 0) {
+        if (lines != null && !lines.isEmpty()) {
             int firstDataRow = 2;
-            int lastDataRow = 1 + n;
-            det.append(rowFromParts(
-                    cellString("TOTAIS (Σ colunas numéricas — conferir Resumo)"),
+            int lastDataRow = lines.size() + 1;
+            controle.append(rowFromParts(
+                    cellString("TOTAL"),
                     cellString(""),
                     cellString(""),
-                    cellFormula("=SUM(R" + firstDataRow + "C4:R" + lastDataRow + "C4)"),
-                    cellFormula("=SUM(R" + firstDataRow + "C5:R" + lastDataRow + "C5)"),
-                    cellFormula("=SUM(R" + firstDataRow + "C6:R" + lastDataRow + "C6)"),
-                    cellFormula("=SUM(R" + firstDataRow + "C7:R" + lastDataRow + "C7)"),
-                    cellFormula("=SUM(R" + firstDataRow + "C8:R" + lastDataRow + "C8)"),
-                    cellString("Soma das linhas listadas (dias com evento ou trecho).")
+                    cellString(""),
+                    cellString(""),
+                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C6:R" + lastDataRow + "C6)", "duration"),
+                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C7:R" + lastDataRow + "C7)", "duration"),
+                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C8:R" + lastDataRow + "C8)", "duration"),
+                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C9:R" + lastDataRow + "C9)", "duration")
             ));
         }
 
-        StringBuilder regras = new StringBuilder();
-        regras.append(rowFromParts(cellString("Regras do motor e parâmetros (exportação)")));
-        regras.append(rowEmpty());
-        if (r.getFormulaDocumentation() != null) {
-            for (String line : r.getFormulaDocumentation()) {
-                regras.append(rowFromParts(cellString(line)));
-            }
-        }
-
-        String inner = worksheet("Resumo", resumo.toString())
-                + worksheet("Detalhe diário", det.toString())
-                + worksheet("Fórmulas e regras", regras.toString());
+        String inner = worksheet("Controle de Jornada", controle.toString());
 
         return workbookXml(inner).getBytes(StandardCharsets.UTF_8);
     }
 
     public byte[] toCsv(ClosureBreakdownResponse r) {
-        String monthLabel = Month.of(r.getMonth()).getDisplayName(TextStyle.FULL, new Locale("pt", "BR"));
         String company = r.getCompanyName() != null ? r.getCompanyName() : "—";
         StringBuilder lines = new StringBuilder();
         lines.append('\ufeff');
