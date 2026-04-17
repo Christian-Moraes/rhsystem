@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -104,13 +105,12 @@ public class ClosureExportService {
         return "TIME(" + h + "," + m + ",0)";
     }
 
-    private static String[] extractPunchSlots(String punchTimeline) {
-        String[] slots = new String[] { "", "", "", "" };
+    private static List<String> extractPunchSlots(String punchTimeline) {
+        List<String> slots = new ArrayList<>();
         if (punchTimeline == null || punchTimeline.isBlank() || "—".equals(punchTimeline)) {
             return slots;
         }
         String[] parts = punchTimeline.split("\\|");
-        int idx = 0;
         for (String part : parts) {
             String token = part.trim();
             int space = token.lastIndexOf(' ');
@@ -118,10 +118,7 @@ public class ClosureExportService {
             if (!time.matches("\\d{2}:\\d{2}")) {
                 continue;
             }
-            if (idx >= slots.length) {
-                break;
-            }
-            slots[idx++] = time;
+            slots.add(time);
         }
         return slots;
     }
@@ -151,49 +148,89 @@ public class ClosureExportService {
         String dailyTierTwoStartExpr = excelTimeLiteralFromMinutes(dailyNormMinutes + tierOneCapMinutes);
         String weekendTierTwoStartExpr = excelTimeLiteralFromMinutes(weekendNormMinutes + tierOneCapMinutes);
         List<ClosureBreakdownResponse.DailyLine> lines = r.getDailyLines();
+        int maxPunches = 0;
+        if (lines != null) {
+            for (ClosureBreakdownResponse.DailyLine d : lines) {
+                int count = extractPunchSlots(d.getPunchTimeline()).size();
+                if (count > maxPunches) {
+                    maxPunches = count;
+                }
+            }
+        }
+        if (maxPunches == 0) {
+            maxPunches = 4;
+        }
+        int workedCol = 2 + maxPunches;
+        int extraRegularCol = workedCol + 1;
+        int extraWeekendCol = workedCol + 2;
+        int absenceCol = workedCol + 3;
         StringBuilder controle = new StringBuilder();
-        controle.append(rowFromParts(
-                cellString("Data"),
-                cellString("Entrada Manhã"),
-                cellString("Saída Manhã"),
-                cellString("Entrada Tarde"),
-                cellString("Saída Tarde"),
-                cellString("Horas Trabalhadas"),
-                cellString("Horas Extras " + overtimePct + "%"),
-                cellString("Horas Extras " + weekendPct + "%"),
-                cellString("Horas Faltas")
-        ));
+        List<String> header = new ArrayList<>();
+        header.add(cellString("Data"));
+        for (int i = 1; i <= maxPunches; i++) {
+            int pair = (i + 1) / 2;
+            header.add(cellString((i % 2 == 1 ? "Entrada " : "Saída ") + pair));
+        }
+        header.add(cellString("Horas Trabalhadas"));
+        header.add(cellString("Horas Extras " + overtimePct + "%"));
+        header.add(cellString("Horas Extras " + weekendPct + "%"));
+        header.add(cellString("Horas Faltas"));
+        controle.append(rowFromParts(header.toArray(new String[0])));
 
         if (lines != null) {
             for (ClosureBreakdownResponse.DailyLine d : lines) {
-                String[] slots = extractPunchSlots(d.getPunchTimeline());
-                controle.append(rowFromParts(
-                        cellDate(d.getDate()),
-                        cellTime(slots[0]),
-                        cellTime(slots[1]),
-                        cellTime(slots[2]),
-                        cellTime(slots[3]),
-                        cellFormulaWithStyle("=IF(OR(RC[-4]=\"\",RC[-3]=\"\"),0,RC[-3]-RC[-4])+IF(OR(RC[-2]=\"\",RC[-1]=\"\"),0,RC[-1]-RC[-2])", "duration"),
-                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-6])=7,IF(RC[-1]>" + weekendNormExpr + ",MIN(RC[-1]-" + weekendNormExpr + "," + tierOneCapExpr + "),0),IF(RC[-1]>" + dailyNormExpr + ",MIN(RC[-1]-" + dailyNormExpr + "," + tierOneCapExpr + "),0))", "duration"),
-                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-7])=7,IF(RC[-2]>" + weekendTierTwoStartExpr + ",RC[-2]-" + weekendTierTwoStartExpr + ",0),IF(RC[-2]>" + dailyTierTwoStartExpr + ",RC[-2]-" + dailyTierTwoStartExpr + ",0))", "duration"),
-                        cellFormulaWithStyle("=IF(WEEKDAY(RC[-8])=7,IF(RC[-3]<" + weekendNormExpr + "," + weekendNormExpr + "-RC[-3],0),IF(RC[-3]<" + dailyNormExpr + "," + dailyNormExpr + "-RC[-3],0))", "duration")
-                ));
+                List<String> slots = extractPunchSlots(d.getPunchTimeline());
+                List<String> row = new ArrayList<>();
+                row.add(cellDate(d.getDate()));
+                for (int i = 0; i < maxPunches; i++) {
+                    row.add(cellTime(i < slots.size() ? slots.get(i) : ""));
+                }
+
+                StringBuilder workedFormula = new StringBuilder("=");
+                boolean hasPairs = false;
+                for (int c = 2; c <= 1 + maxPunches; c += 2) {
+                    int inCol = c;
+                    int outCol = c + 1;
+                    if (outCol > 1 + maxPunches) {
+                        break;
+                    }
+                    if (hasPairs) {
+                        workedFormula.append("+");
+                    }
+                    workedFormula.append("IF(OR(RC").append(inCol).append("=\"\",RC").append(outCol)
+                            .append("=\"\"),0,RC").append(outCol).append("-RC").append(inCol).append(")");
+                    hasPairs = true;
+                }
+                if (!hasPairs) {
+                    workedFormula.append("0");
+                }
+
+                row.add(cellFormulaWithStyle(workedFormula.toString(), "duration"));
+                row.add(cellFormulaWithStyle(
+                        "=IF(WEEKDAY(RC1)=7,IF(RC" + workedCol + ">" + weekendNormExpr + ",MIN(RC" + workedCol + "-" + weekendNormExpr + "," + tierOneCapExpr + "),0),IF(RC" + workedCol + ">" + dailyNormExpr + ",MIN(RC" + workedCol + "-" + dailyNormExpr + "," + tierOneCapExpr + "),0))",
+                        "duration"));
+                row.add(cellFormulaWithStyle(
+                        "=IF(WEEKDAY(RC1)=7,IF(RC" + workedCol + ">" + weekendTierTwoStartExpr + ",RC" + workedCol + "-" + weekendTierTwoStartExpr + ",0),IF(RC" + workedCol + ">" + dailyTierTwoStartExpr + ",RC" + workedCol + "-" + dailyTierTwoStartExpr + ",0))",
+                        "duration"));
+                row.add(cellFormulaWithStyle(
+                        "=IF(WEEKDAY(RC1)=7,IF(RC" + workedCol + "<" + weekendNormExpr + "," + weekendNormExpr + "-RC" + workedCol + ",0),IF(RC" + workedCol + "<" + dailyNormExpr + "," + dailyNormExpr + "-RC" + workedCol + ",0))",
+                        "duration"));
+                controle.append(rowFromParts(row.toArray(new String[0])));
             }
         }
         if (lines != null && !lines.isEmpty()) {
             int firstDataRow = 2;
             int lastDataRow = lines.size() + 1;
-            controle.append(rowFromParts(
-                    cellString("TOTAL"),
-                    cellString(""),
-                    cellString(""),
-                    cellString(""),
-                    cellString(""),
-                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C6:R" + lastDataRow + "C6)", "duration"),
-                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C7:R" + lastDataRow + "C7)", "duration"),
-                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C8:R" + lastDataRow + "C8)", "duration"),
-                    cellFormulaWithStyle("=SUM(R" + firstDataRow + "C9:R" + lastDataRow + "C9)", "duration")
-            ));
+            List<String> total = new ArrayList<>();
+            total.add(cellString("TOTAL"));
+            for (int i = 0; i < maxPunches; i++) {
+                total.add(cellString(""));
+            }
+            total.add(cellFormulaWithStyle("=SUM(R" + firstDataRow + "C" + workedCol + ":R" + lastDataRow + "C" + workedCol + ")", "duration"));
+            total.add(cellFormulaWithStyle("=SUM(R" + firstDataRow + "C" + extraRegularCol + ":R" + lastDataRow + "C" + extraRegularCol + ")", "duration"));
+            total.add(cellFormulaWithStyle("=SUM(R" + firstDataRow + "C" + extraWeekendCol + ":R" + lastDataRow + "C" + extraWeekendCol + ")", "duration"));
+            total.add(cellFormulaWithStyle("=SUM(R" + firstDataRow + "C" + absenceCol + ":R" + lastDataRow + "C" + absenceCol + ")", "duration"));
+            controle.append(rowFromParts(total.toArray(new String[0])));
         }
 
         String inner = worksheet("Controle de Jornada", controle.toString());
