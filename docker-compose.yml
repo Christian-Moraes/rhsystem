@@ -30,8 +30,8 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       JWT_SECRET: ${JWT_SECRET:-your-256-bit-secret-key-change-in-production-minimum-32-characters}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rhsystem
-      # Chave Groq: valor direto do .env.example (sobrescreve com GROQ_API_KEY no .env se quiser)
-      GROQ_API_KEY: REMOVIDO
+      # Chave Groq: defina GROQ_API_KEY no .env (crie em https://console.groq.com/keys)
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     ports:
       - "8086:8080"
     depends_on:
