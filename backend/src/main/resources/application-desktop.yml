@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:5440/rhsystem}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+
+server:
+  port: ${SERVER_PORT:8086}
+
+groq:
+  enabled: ${GROQ_ENABLED:false}

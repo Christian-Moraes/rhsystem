@@ -1,0 +1,80 @@
+# Produção na VPS compartilhada (Oracle, 1 GB RAM) — imagens são buildadas localmente
+# e enviadas via scripts/deploy-vps.sh. Nada é exposto fora de 127.0.0.1;
+# o Nginx do host faz o proxy de HTTPS para o frontend (porta 3006).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rhsystem-postgres
+    environment:
+      POSTGRES_DB: rhsystem
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - max_connections=20
+      - -c
+      - effective_cache_size=64MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d rhsystem"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 160m
+    networks:
+      - rhsystem-network
+    restart: unless-stopped
+
+  backend:
+    image: rhsystem-backend:latest
+    container_name: rhsystem-backend
+    environment:
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CORS_ALLOWED_ORIGINS: https://rh.144-22-135-240.sslip.io
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rhsystem
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 5
+      SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL: "false"
+      LOGGING_LEVEL_COM_RHSYSTEM: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: WARN
+      SERVER_TOMCAT_THREADS_MAX: 20
+      JAVA_TOOL_OPTIONS: >-
+        -Xms64m -Xmx256m -XX:MaxMetaspaceSize=128m -Xss512k
+        -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ReservedCodeCacheSize=32m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 450m
+    networks:
+      - rhsystem-network
+    restart: unless-stopped
+
+  frontend:
+    image: rhsystem-frontend:latest
+    container_name: rhsystem-frontend
+    ports:
+      - "127.0.0.1:3006:80"
+    depends_on:
+      - backend
+    mem_limit: 32m
+    networks:
+      - rhsystem-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  rhsystem-network:
+    driver: bridge

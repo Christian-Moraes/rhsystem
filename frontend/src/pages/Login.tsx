@@ -18,7 +18,7 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false)
   const { register, handleSubmit, formState: { errors } } = useForm<LoginForm>({
     defaultValues: {
-      email: 'christianmath2001@gmail.com',
+      email: '',
       password: ''
     }
   })

@@ -5,6 +5,7 @@ import { employeeService } from '../services/employeeService'
 import { timesheetService } from '../services/timesheetService'
 import { timeEventService, TimeEventRequest } from '../services/timeEventService'
 import { timeImportService, TimeImportResponse } from '../services/timeImportService'
+import { workScheduleService, WorkSchedule } from '../services/workScheduleService'
 import { useCompany } from '../contexts/CompanyContext'
 import { useToast } from '../contexts/ToastContext'
 import Card from '../components/ui/Card'
@@ -15,6 +16,7 @@ import CompanySelect from '../components/ui/CompanySelect'
 import EmployeeSelect from '../components/ui/EmployeeSelect'
 import { ClockIcon, UploadIcon, CheckCircleIcon, DocumentIcon, TrashIcon } from '../components/icons'
 import { PunchTimeInput } from '../components/timesheet/PunchTimeInput'
+import MaskImageModal from '../components/timesheet/MaskImageModal'
 
 interface DayEntry {
   dateStr: string
@@ -34,6 +36,40 @@ function comparePunchTime(a: string, b: string): number {
   return toMin(a) - toMin(b)
 }
 
+/** Distância (min) a partir da qual uma batida é considerada fora da escala: indica leitura duvidosa da IA. */
+const SCHEDULE_DEVIATION_MIN = 45
+
+/**
+ * Feedback do DP (relatório parcial): destacar horários incertos para conferência.
+ * Regras determinísticas sobre o dia: batida faltando, ordem invertida e distância da escala.
+ */
+function dayReviewWarnings(times: string[], schedule?: WorkSchedule): string[] {
+  const filled = times.filter((t) => t && /^\d{1,2}:\d{2}$/.test(t.trim()))
+  if (filled.length === 0) return []
+  const warnings: string[] = []
+  if (filled.length % 2 !== 0) warnings.push('batida faltando (número ímpar de horários)')
+  if (filled.some((t, i) => i > 0 && comparePunchTime(filled[i - 1], t) >= 0)) {
+    warnings.push('horários fora de ordem')
+  }
+  if (schedule) {
+    const toMin = (t: string) => {
+      const [h, m] = t.split(':').map(Number)
+      return h * 60 + m
+    }
+    const first = filled[0]
+    const last = filled[filled.length - 1]
+    const entryDiff = Math.abs(toMin(first) - toMin(schedule.entryTime.slice(0, 5)))
+    if (entryDiff > SCHEDULE_DEVIATION_MIN) {
+      warnings.push(`entrada ${first} a ${entryDiff} min da escala (${schedule.entryTime.slice(0, 5)})`)
+    }
+    const exitDiff = Math.abs(toMin(last) - toMin(schedule.exitTime.slice(0, 5)))
+    if (filled.length % 2 === 0 && exitDiff > SCHEDULE_DEVIATION_MIN) {
+      warnings.push(`saída ${last} a ${exitDiff} min da escala (${schedule.exitTime.slice(0, 5)})`)
+    }
+  }
+  return warnings
+}
+
 export default function TimesheetPage() {
   const [searchParams] = useSearchParams()
   const employeeIdFromUrl = searchParams.get('employeeId') ?? ''
@@ -46,6 +82,7 @@ export default function TimesheetPage() {
   const [gradeData, setGradeData] = useState<Record<string, DayEntry>>({})
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [importFiles, setImportFiles] = useState<File[]>([])
+  const [maskIndex, setMaskIndex] = useState<number | null>(null)
   const [importDragActive, setImportDragActive] = useState(false)
   const [exporting, setExporting] = useState<'xls' | 'csv' | null>(null)
   const [clearDayTarget, setClearDayTarget] = useState<null | { dateStr: string; dayLabel: string }>(null)
@@ -160,6 +197,12 @@ export default function TimesheetPage() {
 
     return { totalDays, filledDays, totalPunches }
   }, [gradeData])
+
+  const { data: workSchedules = [] } = useQuery({
+    queryKey: ['work-schedules', selectedCompany?.id],
+    queryFn: () => workScheduleService.getAll(selectedCompany!.id),
+    enabled: !!selectedCompany?.id,
+  })
 
   const gradeRows = useMemo(() => {
     const n = new Date(year, month, 0).getDate()
@@ -334,6 +377,27 @@ export default function TimesheetPage() {
         year
       ),
     onSuccess: (data: TimeImportResponse) => {
+      // A IA usa o mês/ano escrito na folha; se for outro, a tela passa para esse mês em vez de mostrar a grade errada
+      const firstDate = data.gradeByDate ? Object.keys(data.gradeByDate).sort()[0] : undefined
+      const sheetYear = firstDate ? parseInt(firstDate.slice(0, 4)) : year
+      const sheetMonth = firstDate ? parseInt(firstDate.slice(5, 7)) : month
+      if (sheetMonth !== month || sheetYear !== year) {
+        if (data.events?.length) {
+          queryClient.setQueryData(
+            ['time-events-month', selectedCompany?.id, selectedEmployeeId, sheetMonth, sheetYear],
+            data.events
+          )
+        }
+        setMonth(sheetMonth)
+        setYear(sheetYear)
+        queryClient.invalidateQueries({ queryKey: ['timesheet'] })
+        showToast(
+          `A folha é de ${String(sheetMonth).padStart(2, '0')}/${sheetYear}, diferente do período selecionado ` +
+            `(${String(month).padStart(2, '0')}/${year}). A tela foi alterada para o mês da folha: confira antes de salvar.`,
+          'warning'
+        )
+        return
+      }
       if (data.gradeByDate && Object.keys(data.gradeByDate).length > 0) {
         setGradeData((prev) => {
           const next = { ...prev }
@@ -431,6 +495,10 @@ export default function TimesheetPage() {
 
   const monthName = new Date(2000, month - 1).toLocaleString('pt-BR', { month: 'long' })
   const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId)
+  const employeeSchedule = workSchedules.find((s) => s.id === selectedEmployee?.workScheduleId)
+  const reviewDays = gradeRows.filter(
+    (row) => dayReviewWarnings(row.punches.map((p) => p.time), employeeSchedule).length > 0
+  ).length
   const hasContext = !!selectedCompany && !!selectedEmployeeId
 
   const runClosureExport = async (format: 'xls' | 'csv') => {
@@ -632,6 +700,11 @@ export default function TimesheetPage() {
                         <li key={`${file.name}-${idx}`} className="flex items-center justify-between gap-2 text-sm">
                           <span className="truncate text-gray-900">{file.name}</span>
                           <span className="text-gray-500 shrink-0">{(file.size / 1024).toFixed(1)} KB</span>
+                          {file.type.startsWith('image/') && (
+                            <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => setMaskIndex(idx)}>
+                              Recortar / ocultar dados
+                            </Button>
+                          )}
                           <Button
                             type="button"
                             variant="ghost"
@@ -701,6 +774,16 @@ export default function TimesheetPage() {
               </div>
             </div>
           </Card>
+
+          <MaskImageModal
+            file={maskIndex !== null ? importFiles[maskIndex] ?? null : null}
+            onClose={() => setMaskIndex(null)}
+            onApply={(masked) => {
+              setImportFiles((prev) => prev.map((f, i) => (i === maskIndex ? masked : f)))
+              setMaskIndex(null)
+              showToast('Imagem preparada: a IA receberá só a versão recortada e com tarja.', 'success')
+            }}
+          />
 
           {existingEvents.length === 0 && !isEventsLoading && (
             <Card className="border-amber-200 bg-amber-50">
@@ -785,7 +868,7 @@ export default function TimesheetPage() {
           {/* Grade de Ponto */}
           <Card
             title={`Grade de Ponto — ${selectedEmployee?.name || 'Funcionário'} | ${monthName}/${year}`}
-            description="Enter: próximo campo · Shift+Enter: anterior · ↑↓: ±5 min (Shift: ±15 min)."
+            description={`${reviewDays > 0 ? `${reviewDays} dia(s) destacado(s) para conferência · ` : ''}Enter: próximo campo · Shift+Enter: anterior · ↑↓: ±5 min (Shift: ±15 min).`}
             actions={
               hasUnsavedChanges ? (
                 <Button
@@ -837,7 +920,10 @@ export default function TimesheetPage() {
                         })
                       }
                       const hasAnyTime = row.punches.some((p) => p.time)
-                      const zebra = rowIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'
+                      const warnings = dayReviewWarnings(row.punches.map((p) => p.time), employeeSchedule)
+                      const zebra = warnings.length
+                        ? 'bg-amber-50'
+                        : rowIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'
                       return (
                         <tr
                           key={dateStr}
@@ -893,6 +979,11 @@ export default function TimesheetPage() {
                                 )
                               })}
                             </div>
+                            {warnings.length > 0 && (
+                              <p className="mt-1 text-[11px] font-medium text-amber-700">
+                                ⚠ Revisar: {warnings.join(' · ')}
+                              </p>
+                            )}
                           </td>
                           <td className="px-2 py-2 align-middle">
                             <div className="flex items-center justify-end gap-0.5">

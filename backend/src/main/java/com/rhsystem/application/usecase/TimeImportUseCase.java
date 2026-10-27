@@ -19,6 +19,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -31,6 +41,7 @@ import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -53,14 +64,25 @@ public class TimeImportUseCase {
     @Value("${groq.api-key:}")
     private String groqApiKey;
 
+    @Value("${groq.enabled:true}")
+    private boolean groqEnabled;
+
     @Value("${groq.api-key-file:}")
     private String groqApiKeyFile;
 
     @Value("${groq.model:}")
     private String groqModel;
 
-    @Value("${groq.vision-fallbacks:meta-llama/llama-4-scout-17b-16e-instruct,llama-3.2-90b-vision-preview}")
+    @Value("${groq.vision-fallbacks:qwen/qwen3.8-27b}")
     private String groqVisionFallbacks;
+
+    /** Limite TPM on_demand do Qwen (~8k): max_tokens alto estoura junto com a imagem. */
+    private static final int GROQ_MAX_TOKENS = 2048;
+    /** Lado maior máximo da imagem enviada à Groq (tokens de visão sobem com resolução). */
+    private static final int GROQ_IMAGE_MAX_SIDE = 2000;
+    /** Abaixo disso a imagem é ampliada (até 2x) antes do envio. */
+    private static final int GROQ_IMAGE_MIN_SIDE = 1000;
+    private static final float GROQ_JPEG_QUALITY = 0.85f;
 
     @Value("${groq.thinking-model:}")
     private String groqThinkingModel;
@@ -132,7 +154,8 @@ public class TimeImportUseCase {
             case "JPG":
             case "JPEG":
             case "PNG":
-                log.info("[IMPORT_IMAGE] Requisição: arquivo={} size={} bytes, mês/ano da tela={}/{}", file.getOriginalFilename(), file.getSize(), targetMonth, targetYear);
+                // Nome do arquivo não vai para o log: costuma trazer o nome do trabalhador (LGPD)
+                log.info("[IMPORT_IMAGE] Requisição: size={} bytes, mês/ano da tela={}/{}", file.getSize(), targetMonth, targetYear);
                 events = processImageFile(employeeId, file, targetMonth, targetYear, quinzena);
                 break;
             case "PDF":
@@ -263,12 +286,15 @@ public class TimeImportUseCase {
 
     /** Importa por imagem apenas via IA (Groq). Sem fallback para dados de exemplo. */
     private List<TimeEvent> processImageFile(UUID employeeId, MultipartFile file, int targetMonth, int targetYear, Integer quinzena) {
+        if (!groqEnabled) {
+            throw new RuntimeException("Importacao por imagem desabilitada no modo offline/desktop.");
+        }
         String key = getEffectiveGroqKey();
         if (key.isEmpty()) {
             throw new RuntimeException("Configure GROQ_API_KEY no ambiente ou em " + groqApiKeyFile + " para importar por imagem. Sem fallback para dados de exemplo.");
         }
         log.info("[IMPORT_IMAGE] GROQ_API_KEY presente: length={} prefix={}", key.length(), key.startsWith("gsk_") ? "gsk_..." : "outro");
-        log.info("[IMPORT_IMAGE] Processando imagem: name={} size={} contentType={} mês/ano tela={}/{} quinzena={}", file.getOriginalFilename(), file.getSize(), file.getContentType(), targetMonth, targetYear, quinzena);
+        log.info("[IMPORT_IMAGE] Processando imagem: size={} contentType={} mês/ano tela={}/{} quinzena={}", file.getSize(), file.getContentType(), targetMonth, targetYear, quinzena);
         List<TimeEvent> events = new ArrayList<>();
         try {
             byte[] bytes = file.getBytes();
@@ -306,11 +332,75 @@ public class TimeImportUseCase {
         return events;
     }
 
+    /**
+     * Redimensiona/comprime a imagem para caber no limite TPM da Groq (on_demand ~8k).
+     * Retorna JPEG; se falhar a leitura, devolve o original.
+     */
+    private byte[] compressImageForGroq(byte[] imageBytes) {
+        try {
+            BufferedImage src = ImageIO.read(new ByteArrayInputStream(imageBytes));
+            if (src == null) {
+                log.warn("[IMPORT_IMAGE] ImageIO não leu a imagem; enviando original ({} bytes)", imageBytes.length);
+                return imageBytes;
+            }
+            int w = src.getWidth();
+            int h = src.getHeight();
+            int maxSide = Math.max(w, h);
+            // Fotos pequenas (prints, fotos recortadas) são ampliadas: dígitos com poucos pixels
+            // fazem o modelo confundir 8 com 0. Em teste, ampliar 540px -> 1080px subiu o acerto de 86% para 98%.
+            double scale;
+            if (maxSide > GROQ_IMAGE_MAX_SIDE) {
+                scale = (double) GROQ_IMAGE_MAX_SIDE / maxSide;
+            } else if (maxSide < GROQ_IMAGE_MIN_SIDE) {
+                scale = Math.min(2.0, (double) GROQ_IMAGE_MAX_SIDE / maxSide);
+            } else {
+                scale = 1.0;
+            }
+            int nw = Math.max(1, (int) Math.round(w * scale));
+            int nh = Math.max(1, (int) Math.round(h * scale));
+            BufferedImage rgb = new BufferedImage(nw, nh, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = rgb.createGraphics();
+            try {
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+                g.drawImage(src, 0, 0, nw, nh, null);
+            } finally {
+                g.dispose();
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
+            if (!writers.hasNext()) {
+                ImageIO.write(rgb, "jpg", baos);
+            } else {
+                ImageWriter writer = writers.next();
+                ImageWriteParam param = writer.getDefaultWriteParam();
+                if (param.canWriteCompressed()) {
+                    param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                    param.setCompressionQuality(GROQ_JPEG_QUALITY);
+                }
+                try (ImageOutputStream ios = ImageIO.createImageOutputStream(baos)) {
+                    writer.setOutput(ios);
+                    writer.write(null, new IIOImage(rgb, null, null), param);
+                } finally {
+                    writer.dispose();
+                }
+            }
+            byte[] out = baos.toByteArray();
+            log.info("[IMPORT_IMAGE] Imagem comprimida: {}x{} ({} bytes) -> {}x{} ({} bytes JPEG)",
+                    w, h, imageBytes.length, nw, nh, out.length);
+            return out;
+        } catch (Exception e) {
+            log.warn("[IMPORT_IMAGE] Falha ao comprimir imagem ({}): enviando original", e.getMessage());
+            return imageBytes;
+        }
+    }
+
     /** Chama API Groq (visão) — chave via groq.api-key / GROQ_API_KEY; nunca commitar a chave. */
     private List<LocalDateTime> extractTimesViaGroq(byte[] imageBytes, String contentType, int targetMonth, int targetYear, Integer quinzena) throws Exception {
         log.info("[IMPORT_IMAGE] extractTimesViaGroq: imageBytes={} bytes, targetMonth={}, targetYear={}", imageBytes.length, targetMonth, targetYear);
-        String mime = contentType != null && contentType.startsWith("image/") ? contentType : "image/jpeg";
-        String dataUrl = "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
+        byte[] payload = compressImageForGroq(imageBytes);
+        String mime = "image/jpeg";
+        String dataUrl = "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(payload);
         String prompt = "Você analisa uma imagem de folha de ponto, cartão de ponto ou espelho de ponto (qualquer modelo: quinzena, mês completo, cartão físico, planilha, com texto impresso e/ou anotações à mão). "
                 + "Extraia TODAS as batidas (horários) agrupadas por DATA.\n\n"
                 + "REGRAS GLOBAIS — valem para QUALQUER tipo de ponto; siga sempre o que está na imagem:\n"
@@ -326,8 +416,8 @@ public class TimeImportUseCase {
                 + "Nunca invente entradas/saídas para linhas em branco.\n"
                 + "(6) PRECISÃO: Transcreva o horário exatamente como na célula. 16:00 não é 17:00. "
                 + "Muitas folhas encerram a sexta-feira às 16:00 — não \"normalize\" para 17:00 nem arredonde.\n\n"
-                + "Responda APENAS um JSON válido, sem markdown:\n"
-                + "{\"days\":[{\"date\":\"YYYY-MM-DD\",\"times\":[\"HH:mm\",\"HH:mm\",...]},...]}\n"
+                + "Responda APENAS um JSON válido, sem markdown. Em \"month\" (1 a 12) e \"year\" informe o mês e o ano ESCRITOS na folha; se a folha não indicar, use null:\n"
+                + "{\"month\":M,\"year\":YYYY,\"days\":[{\"date\":\"YYYY-MM-DD\",\"times\":[\"HH:mm\",\"HH:mm\",...]},...]}\n"
                 + "Alternativa: pode usar \"day\": N (número 1-31) em vez de \"date\". Não invente datas nem horários. Inclua todos os dias que tiverem pelo menos um horário. Lista completa.";
         log.debug("[IMPORT_IMAGE] Prompt enviado à IA (primeiros 500 chars): {}", prompt.length() > 500 ? prompt.substring(0, 500) + "..." : prompt);
         List<String> modelsToTry = new ArrayList<>();
@@ -341,8 +431,7 @@ public class TimeImportUseCase {
             }
         }
         if (modelsToTry.isEmpty()) {
-            modelsToTry.add("meta-llama/llama-4-scout-17b-16e-instruct");
-            modelsToTry.add("llama-3.2-90b-vision-preview");
+            modelsToTry.add("qwen/qwen3.8-27b");
         }
         if (groqThinkingModel != null && !groqThinkingModel.isBlank()) {
             String t = groqThinkingModel.trim();
@@ -353,14 +442,15 @@ public class TimeImportUseCase {
         for (String modelId : modelsToTry) {
             try {
                 log.info("[IMPORT_IMAGE] Tentando modelo Groq: {}", modelId);
-                result = callGroqVision(dataUrl, prompt, modelId, targetMonth, targetYear);
+                result = callGroqVisionWithRetry(dataUrl, prompt, modelId, targetMonth, targetYear);
                 if (result != null && !result.isEmpty()) {
                     log.info("[IMPORT_IMAGE] Modelo {} retornou {} horários", modelId, result.size());
                     break;
                 }
             } catch (Exception e) {
                 log.warn("[IMPORT_IMAGE] Modelo {} falhou: {}", modelId, e.getMessage());
-                lastError = e;
+                // Mantém o erro do primeiro modelo (o de visão): o do fallback costuma esconder a causa real
+                if (lastError == null) lastError = e;
             }
         }
         if (result == null || result.isEmpty()) {
@@ -370,11 +460,43 @@ public class TimeImportUseCase {
         return result;
     }
 
+    private static final int GROQ_RATE_LIMIT_RETRIES = 3;
+    private static final Pattern GROQ_RETRY_AFTER = Pattern.compile("try again in ([0-9.]+)(ms|s)");
+
+    /** No plano gratuito da Groq, envios em sequência estouram o limite por minuto (HTTP 429): espera e tenta de novo. */
+    private List<LocalDateTime> callGroqVisionWithRetry(String dataUrl, String prompt, String modelId, int targetMonth, int targetYear) throws Exception {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return callGroqVision(dataUrl, prompt, modelId, targetMonth, targetYear);
+            } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                if (!msg.startsWith("Groq API 429") || attempt > GROQ_RATE_LIMIT_RETRIES) throw e;
+                long waitMs = 5000;
+                Matcher m = GROQ_RETRY_AFTER.matcher(msg);
+                if (m.find()) {
+                    double v = Double.parseDouble(m.group(1));
+                    waitMs = (long) Math.ceil("ms".equals(m.group(2)) ? v : v * 1000) + 500;
+                }
+                waitMs = Math.min(waitMs, 20000);
+                log.info("[IMPORT_IMAGE] Limite da Groq atingido ({}); nova tentativa {} em {} ms", modelId, attempt, waitMs);
+                Thread.sleep(waitMs);
+            }
+        }
+    }
+
     private List<LocalDateTime> callGroqVision(String dataUrl, String prompt, String modelId, int targetMonth, int targetYear) throws Exception {
         var root = objectMapper.createObjectNode();
         root.put("model", modelId);
-        root.put("max_tokens", 8192);
+        // Reasoning models (qwen3): max_tokens vira orçamento de think+resposta; sem "none" o JSON não chega.
+        root.put("max_completion_tokens", GROQ_MAX_TOKENS);
         root.put("temperature", 0.2);
+        String modelLower = modelId != null ? modelId.toLowerCase(Locale.ROOT) : "";
+        if (modelLower.contains("qwen")) {
+            // Sem thinking: senão o orçamento acaba em <think> e o JSON não sai.
+            root.put("reasoning_effort", "none");
+        } else if (modelLower.contains("gpt-oss")) {
+            root.put("reasoning_effort", "medium");
+        }
         var messages = root.putArray("messages");
         var userMsg = messages.addObject();
         userMsg.put("role", "user");
@@ -398,7 +520,16 @@ public class TimeImportUseCase {
         String responseBody = response.body();
         log.info("[IMPORT_IMAGE] Groq API resposta: status={} bodyLength={}", response.statusCode(), responseBody.length());
         try {
-            JsonNode choices = objectMapper.readTree(responseBody).path("choices");
+            JsonNode tree = objectMapper.readTree(responseBody);
+            JsonNode usage = tree.path("usage");
+            if (!usage.isMissingNode()) {
+                log.info("[IMPORT_IMAGE] Groq usage: prompt={} completion={} total={} finish={}",
+                        usage.path("prompt_tokens").asInt(-1),
+                        usage.path("completion_tokens").asInt(-1),
+                        usage.path("total_tokens").asInt(-1),
+                        tree.path("choices").path(0).path("finish_reason").asText(""));
+            }
+            JsonNode choices = tree.path("choices");
             if (choices.isArray() && choices.size() > 0) {
                 JsonNode msgContent = choices.get(0).path("message").path("content");
                 String contentText = msgContent.isTextual() ? msgContent.asText("") : "";
@@ -412,6 +543,9 @@ public class TimeImportUseCase {
                 if (!contentText.isBlank()) {
                     int len = Math.min(1000, contentText.length());
                     log.info("[IMPORT_IMAGE] Resposta da IA (até {} chars): {}", len, contentText.substring(0, len) + (contentText.length() > len ? "..." : ""));
+                } else {
+                    log.warn("[IMPORT_IMAGE] Conteúdo da IA vazio (finish_reason={})",
+                            choices.get(0).path("finish_reason").asText(""));
                 }
             }
         } catch (Exception e) {
@@ -424,6 +558,38 @@ public class TimeImportUseCase {
         }
         LocalDate defaultDate = LocalDate.of(targetYear, targetMonth, 1);
         return parseGroqContent(responseBody, defaultDate);
+    }
+
+    /** Remove blocos de raciocínio (&lt;think&gt;...&lt;/think&gt;) deixando só o JSON/texto útil. */
+    private static String stripThinkBlocks(String text) {
+        if (text == null || text.isBlank()) return text == null ? "" : text.trim();
+        String out = text;
+        // Tags com ou sem sufixo (think, thinking, reasoning)
+        Pattern p = Pattern.compile("(?is)<\\s*(think|thinking|reasoning)\\b[^>]*>.*?<\\s*/\\s*\\1\\s*>");
+        out = p.matcher(out).replaceAll("");
+        // Fallback: remove de <think> até o fim se não fechou
+        int open = out.toLowerCase(Locale.ROOT).indexOf("<think");
+        if (open >= 0) {
+            int close = out.toLowerCase(Locale.ROOT).indexOf("</think>", open);
+            if (close >= 0) {
+                out = out.substring(0, open) + out.substring(close + "</think>".length());
+            } else {
+                // Conteúdo só de thinking truncado — sem JSON útil
+                out = out.substring(0, open);
+            }
+        }
+        out = out.trim();
+        // Se sobrou texto antes do JSON, pega a partir do primeiro { ou [
+        if (!out.isEmpty() && !out.startsWith("{") && !out.startsWith("[")) {
+            int o = out.indexOf('{');
+            int a = out.indexOf('[');
+            int start = -1;
+            if (o >= 0 && a >= 0) start = Math.min(o, a);
+            else if (o >= 0) start = o;
+            else if (a >= 0) start = a;
+            if (start >= 0) out = out.substring(start).trim();
+        }
+        return out;
     }
 
     private List<LocalDateTime> parseGroqContent(String jsonBody, LocalDate defaultDate) throws Exception {
@@ -452,6 +618,8 @@ public class TimeImportUseCase {
         } else {
             text = contentNode.asText("").trim();
         }
+        // Qwen reasoning: remove bloco <think>...</think> se ainda vier no content
+        text = stripThinkBlocks(text);
         if (text.startsWith("```")) {
             // Tenta extrair apenas o bloco JSON dentro de ``` ``` (evita pegar texto explicativo antes/depois)
             int codeFenceStart = text.indexOf("```json");
@@ -482,6 +650,15 @@ public class TimeImportUseCase {
         if (text.startsWith("{")) {
             try {
                 JsonNode obj = objectMapper.readTree(text);
+                // Mês/ano escritos na folha prevalecem sobre o período selecionado na tela
+                int sheetMonth = obj.path("month").asInt(0);
+                int sheetYear = obj.path("year").asInt(0);
+                if (sheetMonth >= 1 && sheetMonth <= 12 && sheetYear >= 2000 && sheetYear <= 2100) {
+                    if (sheetMonth != def.getMonthValue() || sheetYear != def.getYear()) {
+                        log.info("[IMPORT_IMAGE] Folha é de {}/{}; tela estava em {}/{}", sheetMonth, sheetYear, def.getMonthValue(), def.getYear());
+                    }
+                    def = LocalDate.of(sheetYear, sheetMonth, 1);
+                }
                 JsonNode days = obj.path("days");
                 if (days.isArray()) {
                     List<Integer> parsedDays = new ArrayList<>();

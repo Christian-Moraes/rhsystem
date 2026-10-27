@@ -36,15 +36,20 @@ server:
 
 # Groq API (importação por imagem) — env GROQ_API_KEY ou arquivo (atualizar sem reiniciar: echo "gsk_xxx" > /tmp/groq_api_key no container)
 groq:
+  enabled: ${GROQ_ENABLED:true}
   api-key: ${GROQ_API_KEY:${GROQ_APIKEY:}}
   # Se existir, lê a chave deste arquivo a cada requisição (permite atualizar com docker exec sem derrubar)
   api-key-file: ${GROQ_API_KEY_FILE:/tmp/groq_api_key}
   # Modelo de visão principal (opcional). Se vazio, usa a lista vision-fallbacks.
-  model: ${GROQ_MODEL:}
+  model: ${GROQ_MODEL:qwen/qwen3.8-27b}
   # Fallbacks de modelo de visão, em ordem (separados por vírgula). Usados quando model está vazio ou falha.
-  vision-fallbacks: ${GROQ_VISION_FALLBACKS:meta-llama/llama-4-scout-17b-16e-instruct,llama-3.2-90b-vision-preview}
-  # Modelo de pensar/raciocínio (opcional). Fallback quando todos os de visão falham (envia só texto).
-  thinking-model: ${GROQ_THINKING_MODEL:qwen/qwen3-32b}
+  vision-fallbacks: ${GROQ_VISION_FALLBACKS:qwen/qwen3.8-27b}
+  # Modelo de pensar/raciocínio (fallback). openai/gpt-oss-120b com reasoning_effort=medium.
+  thinking-model: ${GROQ_THINKING_MODEL:openai/gpt-oss-120b}
+
+cors:
+  # Origens permitidas, separadas por vírgula (em produção: CORS_ALLOWED_ORIGINS=https://seu-dominio)
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:3006,http://localhost:80,tauri://localhost,http://tauri.localhost}
 
 jwt:
   secret: ${JWT_SECRET:your-256-bit-secret-key-change-in-production-minimum-32-characters}
